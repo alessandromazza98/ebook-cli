@@ -19,12 +19,15 @@ checks. Build and configure:
 ```sh
 cargo test --locked -j 2
 cargo clippy --locked --all-targets -- -D warnings
-cargo build --locked -j 2
-python3 scripts/smoke.py
+cargo build --release --locked -j 2
+python3 scripts/smoke.py --binary target/release/ebook
 mkdir -p bin
-install -m 0755 target/debug/ebook bin/ebook
+install -m 0755 target/release/ebook bin/ebook
 bin/ebook --config config.json setup
 ```
+
+Use the release executable for the API and worker services. Once installed and
+verified, `cargo clean` removes generated build output without removing `bin/ebook`.
 
 The optional `scripts/cargo` helper uses Cargo from your PATH. It also supports
 existing isolated installations under `.toolchain/` when present.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """CLI integration checks against a local qBittorrent stub; never sends email."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -15,9 +16,7 @@ import urllib.request
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = ROOT / 'target/debug/ebook'
-
-def main():
+def main(binary):
     with tempfile.TemporaryDirectory(prefix='ebook-smoke-') as tmp:
         root = Path(tmp)
         added = []
@@ -69,7 +68,7 @@ def main():
         cfg = root/'config.json'
         cfg.write_text(json.dumps(config)); cfg.chmod(0o600)
         def cli(*args, code=0):
-            p = subprocess.run([str(BIN),'--config',str(cfg),*args],capture_output=True,text=True,timeout=45)
+            p = subprocess.run([str(binary),'--config',str(cfg),*args],capture_output=True,text=True,timeout=45)
             assert p.returncode == code, (args,p.returncode,p.stdout,p.stderr)
             return json.loads(p.stdout)
         cli('jobs')
@@ -121,7 +120,7 @@ def main():
         # Run the real HTTP server and verify auth/schema/contract boundaries.
         with socket.socket() as s:
             s.bind(('127.0.0.1',0)); port=s.getsockname()[1]
-        api=subprocess.Popen([str(BIN),'--config',str(cfg),'serve','--listen',f'127.0.0.1:{port}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        api=subprocess.Popen([str(binary),'--config',str(cfg),'serve','--listen',f'127.0.0.1:{port}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         try:
             base=f'http://127.0.0.1:{port}'
             for _ in range(50):
@@ -203,4 +202,9 @@ def main():
         assert not (root/'escape').exists()
         print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi','authenticated_help','help_excludes_secrets','help_creates_no_jobs']}))
 
-if __name__=='__main__': main()
+if __name__=='__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', type=Path, default=ROOT/'target/debug/ebook',
+                        help='Executable to test (default: target/debug/ebook)')
+    args = parser.parse_args()
+    main(args.binary.resolve(strict=True))
