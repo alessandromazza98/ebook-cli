@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+self=$(readlink -f -- "$0")
+root=$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)
+export EBOOK_CONFIG="${EBOOK_CONFIG:-$root/config.json}"
+exec "$root/bin/ebook" "$@"

@@ -1,0 +1,12 @@
+/target
+.toolchain/
+runtime/
+*.sqlite*
+config.json
+__pycache__/
+bin/
+.env
+.env.*
+*.pem
+*.key
+*.torrent

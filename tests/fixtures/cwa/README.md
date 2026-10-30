@@ -1,0 +1,1 @@
+Fixtures from Calibre-Web Automated, revision 4fc2c4459965efb1b8ff43ea7849c2f47a755d9c, https://github.com/crocodilestick/Calibre-Web-Automated/tree/4fc2c4459965efb1b8ff43ea7849c2f47a755d9c/tests/fixtures/sample_books . Used only as compatibility test data; upstream GPL-3.0-or-later attribution applies to this fixture directory.

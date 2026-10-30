@@ -1,0 +1,26 @@
+[Unit]
+Description=Private ebook CLI API
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ebook
+Group=ebook
+UMask=0077
+ExecStart=/opt/ebook-cli/bin/ebook --config /etc/ebook-cli/config.json serve
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=180
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/ebook-cli
+MemoryMax=384M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

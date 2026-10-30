@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export CARGO_HOME="$root/.toolchain/cargo"
+export RUSTUP_HOME="$root/.toolchain/rustup"
+exec "$CARGO_HOME/bin/cargo" "$@"

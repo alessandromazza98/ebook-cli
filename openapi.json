@@ -1,0 +1,611 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Private Ebook API",
+    "version": "0.1.0",
+    "description": "Loopback listener accessed through an authenticated SSH tunnel. SMTP acceptance requires separate user delivery confirmation."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8791"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "security": [],
+        "operationId": "liveness",
+        "responses": {
+          "200": {
+            "description": "Process is accepting HTTP; does not check remote dependencies"
+          }
+        }
+      }
+    },
+    "/v1/operations": {
+      "post": {
+        "operationId": "ebookOperation",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Operation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "search": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "query"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "search"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      },
+      "select": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "release_id",
+          "idempotency_key"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "select"
+          },
+          "release_id": {
+            "type": "string",
+            "pattern": "^mam:[0-9]+$"
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "request": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "title",
+          "idempotency_key"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "request"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "author": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "jobs": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "jobs"
+          }
+        }
+      },
+      "status": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "job_id"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "status"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        }
+      },
+      "retry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "job_id"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "retry"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "acknowledge_possible_duplicate": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "confirm_delivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "job_id"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "confirm_delivery"
+          },
+          "job_id": {
+            "type": "string"
+          }
+        }
+      },
+      "Operation": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/search"
+          },
+          {
+            "$ref": "#/components/schemas/select"
+          },
+          {
+            "$ref": "#/components/schemas/request"
+          },
+          {
+            "$ref": "#/components/schemas/jobs"
+          },
+          {
+            "$ref": "#/components/schemas/status"
+          },
+          {
+            "$ref": "#/components/schemas/retry"
+          },
+          {
+            "$ref": "#/components/schemas/confirm_delivery"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "action"
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Envelope": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "ok",
+              "data"
+            ],
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "data": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SearchResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JobResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JobsResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Clarification"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "ok",
+              "error"
+            ],
+            "properties": {
+              "ok": {
+                "const": false
+              },
+              "error": {
+                "$ref": "#/components/schemas/Error"
+              }
+            }
+          }
+        ]
+      },
+      "Release": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "author",
+          "language",
+          "format",
+          "size_bytes",
+          "seeders",
+          "restrictions",
+          "eligible"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^mam:[0-9]+$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "author": {
+            "type": "string"
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "seeders": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "restrictions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "eligible": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "required": [
+          "id",
+          "release_id",
+          "language",
+          "state",
+          "torrent_hash",
+          "prepared_path",
+          "message_id",
+          "error",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "release_id": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "downloading",
+              "preparing",
+              "ready",
+              "sending",
+              "smtp_accepted",
+              "send_uncertain",
+              "failed",
+              "existing_workflow",
+              "delivered"
+            ]
+          },
+          "torrent_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prepared_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Error"
+              }
+            ]
+          },
+          "updated_at": {
+            "type": "integer",
+            "description": "Unix timestamp of last state/progress observation"
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "required": [
+          "releases",
+          "reported_total",
+          "truncated"
+        ],
+        "properties": {
+          "releases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Release"
+            }
+          },
+          "reported_total": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "JobResult": {
+        "type": "object",
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/Job"
+          },
+          "selection": {
+            "type": "object"
+          }
+        }
+      },
+      "JobsResult": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Job"
+            }
+          }
+        }
+      },
+      "Clarification": {
+        "type": "object",
+        "required": [
+          "status",
+          "reason",
+          "candidates"
+        ],
+        "properties": {
+          "status": {
+            "const": "clarification_required"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "release",
+                "score"
+              ],
+              "properties": {
+                "release": {
+                  "$ref": "#/components/schemas/Release"
+                },
+                "score": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

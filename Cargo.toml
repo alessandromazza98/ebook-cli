@@ -1,0 +1,32 @@
+[package]
+name = "ebook-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "ebook"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+encoding_rs = "0.8"
+fs2 = "0.4"
+hex = "0.4"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "ring", "webpki-roots"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "cookies", "multipart", "rustls-tls"] }
+roxmltree = "0.20"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
