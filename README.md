@@ -1,6 +1,6 @@
 # Ebook CLI
 
-Rust CLI, SQLite worker and private HTTP API for MAM → qBittorrent → repaired
+Rust CLI, SQLite worker and authenticated HTTP API for MAM → qBittorrent → repaired
 EPUB → Kindle email. The default output is one JSON envelope on stdout; worker
 events go to stderr/journald. It uses no AI service.
 
@@ -184,6 +184,17 @@ a restricted client (generate a fresh random token, at least 32 characters):
 "max_torrent_bytes": 104857600
 ```
 
+Start with authenticated `GET /v1/help` (`ebookHelp` in OpenAPI). It explains the
+workflow and examples, reports whether the destination is configured without
+exposing its address, and returns this credential's permissions and actual limits.
+It performs no dependency calls or job mutations. `delivery.configured` describes
+local configuration only; it is not a readiness check or proof of Kindle delivery.
+
+`search` only finds books. To fulfill a request to send one, call `request` or
+`select` and require a returned `data.job.id` before claiming a job exists. The
+worker handles downloading and emailing automatically. If a tool blocks the
+submission, report its actual error rather than an unspecified server failure.
+
 The restricted token permits `search`, `request`, `select`, `jobs` and `status`.
 It cannot retry a send or confirm Kindle delivery. Use the local CLI for those
 actions. Both credentials use `Authorization: Bearer TOKEN`; store the client's
@@ -218,9 +229,9 @@ For Apache deployment:
    after renewing this certificate, and verify renewal with `certbot renew
    --cert-name ebook.example.com --dry-run`.
 4. Register `https://ebook.example.com/openapi.json` in the agent's tool settings
-   and supply the restricted token through its secret store. Use a 130-second
-   client deadline. The Apache example proxies only `POST /v1/operations` and
-   serves the public schema; plain HTTP serves only certificate challenges.
+   and supply the restricted token through its secret store. Call `/v1/help` first. Use a 130-second
+   client deadline. The Apache example exposes `POST /v1/operations`,
+   authenticated `GET /v1/help`, and the public schema; plain HTTP serves only certificate challenges.
 
 Proxy access logs contain method, path, status and timing, excluding headers,
 query strings and bodies. API events contain operation names, job IDs and error

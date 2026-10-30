@@ -152,6 +152,22 @@ def main():
             except urllib.error.HTTPError as e:
                 assert e.code==401 and json.load(e)['error']['code']=='unauthorized'
             client=config['api']['client_token']
+            for token,expected in [('wrong',401),(client,200)]:
+                req=urllib.request.Request(base+'/v1/help',headers={'Authorization':'Bearer '+token})
+                try:
+                    with urllib.request.urlopen(req,timeout=10) as r: help_body=json.load(r); actual=r.status
+                except urllib.error.HTTPError as e: actual=e.code; help_body=json.load(e)
+                assert actual==expected
+            help_data=help_body['data']
+            assert help_data['delivery']['configured'] is True
+            assert help_data['delivery']['destination_address_required_from_caller'] is False
+            assert help_data['authentication']['allowed_actions']==['search','request','select','jobs','status']
+            assert help_data['limits']['requests_per_minute']==12
+            assert help_data['limits']['new_jobs_per_rolling_24_hours']==1
+            assert conn.execute('SELECT count(*) FROM jobs').fetchone()[0]==3
+            assert conn.execute('SELECT count(*) FROM api_submissions').fetchone()[0]==0
+            for secret in [config['api_token'],client,config['smtp']['kindle'],config['mam']['session']]:
+                assert secret not in json.dumps(help_body)
             request({'action':'jobs'},client,200)
             request({'action':'retry','job_id':job_id,'acknowledge_possible_duplicate':True},client,403)
             request({'action':'confirm_delivery','job_id':job_id},client,403)
@@ -167,7 +183,7 @@ def main():
             assert request({'action':'select','release_id':'mam:4','idempotency_key':'api-over-quota'},client,429)['error']['code']=='daily_quota_exceeded'
             assert request({'action':'select','release_id':'mam:5','idempotency_key':'api-large'},client,422)['error']['code']=='download_too_large'
             request({'action':'jobs','extra':'x'},client,400)
-            for _ in range(3): request({'action':'jobs'},client,200)
+            for _ in range(2): request({'action':'jobs'},client,200)
             assert request({'action':'jobs'},client,429)['error']['code']=='rate_limited'
             request({'action':'jobs'},config['api_token'],200) # Separate owner rate budget.
             assert conn.execute('SELECT count(*) FROM api_submissions').fetchone()[0]==1
@@ -180,10 +196,11 @@ def main():
         subprocess.run(['python3',str(ROOT/'scripts/export-openapi.py'),'--server','https://ebook.example.com','--output',str(schema)],check=True,timeout=10)
         spec=json.loads(schema.read_text())
         assert spec['servers']==[{'url':'https://ebook.example.com'}]
-        assert list(spec['paths'])==['/v1/operations']
+        assert set(spec['paths'])=={'/v1/operations','/v1/help'}
+        assert spec['paths']['/v1/help']['get']['operationId']=='ebookHelp'
         assert len(spec['components']['schemas']['Operation']['oneOf'])==5
         assert 'retry' not in spec['components']['schemas']
         assert not (root/'escape').exists()
-        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi']}))
+        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi','authenticated_help','help_excludes_secrets','help_creates_no_jobs']}))
 
 if __name__=='__main__': main()

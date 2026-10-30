@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
@@ -132,6 +132,66 @@ async fn deadline(request: Request, next: Next) -> Response {
         ),
     }
 }
+fn help_document(c: &Config, role: Role) -> Value {
+    let mut actions = vec!["search", "request", "select", "jobs", "status"];
+    if role == Role::Owner {
+        actions.extend(["retry", "confirm_delivery"]);
+    }
+    json!({
+        "api_version": env!("CARGO_PKG_VERSION"),
+        "purpose": "Find EPUB books, download through qBittorrent, prepare them and email them to the server-configured Kindle.",
+        "delivery": {
+            "configured": !c.smtp.host.is_empty() && !c.smtp.from.is_empty() && !c.smtp.kindle.is_empty(),
+            "destination": "server_configured_kindle",
+            "destination_address_required_from_caller": false,
+            "instruction": "The server owns the recipient and SMTP configuration. Do not ask for a Kindle address or pass one in a request. Configured does not mean a live SMTP or Kindle-delivery check has passed."
+        },
+        "authentication": {"scheme":"Bearer", "credential_role":role.name(), "allowed_actions":actions},
+        "operations": {
+            "search": "Read-only lookup. Returns releases and caches their IDs. It NEVER creates a job, downloads or sends a book.",
+            "request": "Submit a title with optional author/language and an idempotency_key. A clear match creates or reuses a job; ambiguity returns clarification_required without creating a job.",
+            "select": "Submit an eligible release_id from search or clarification candidates, language if needed, and an idempotency_key. Creates or reuses a job. The worker automatically downloads, prepares and sends it; no separate download/send call is needed.",
+            "jobs": "List existing jobs. Does not create or start anything.",
+            "status": "Read an existing job using its job_id. Does not create or start anything."
+        },
+        "workflow": [
+            "For a user's request to send a book, call request, or search followed by select for the chosen eligible release.",
+            "After clarification_required, ask only about the ambiguity described in reason/candidates, then select the user's choice.",
+            "Only report that a job exists after receiving ok=true and data.job.id. Inspect data.job.state: a replay can return a completed job without sending again.",
+            "Poll status for the returned job_id every 15–30 seconds until a terminal state. Downloads and SMTP run in the background.",
+            "Report SMTP acceptance accurately and ask the user to confirm actual Kindle arrival. The restricted client cannot force retries or mark delivery confirmed."
+        ],
+        "http": {"method":"POST", "path":"/v1/operations", "content_type":"application/json", "client_timeout_seconds":130},
+        "examples": {
+            "request": {"action":"request", "title":"Alice's Adventures in Wonderland", "author":"Lewis Carroll", "language":"en", "idempotency_key":"REPLACE_WITH_A_UNIQUE_KEY_FOR_THIS_SUBMISSION"},
+            "search": {"action":"search", "query":"Alice's Adventures in Wonderland"},
+            "select": {"action":"select", "release_id":"REPLACE_WITH_RELEASE_ID_FROM_SEARCH", "language":"en", "idempotency_key":"REPLACE_WITH_A_UNIQUE_KEY_FOR_THIS_SUBMISSION"},
+            "status": {"action":"status", "job_id":"REPLACE_WITH_RETURNED_JOB_ID"},
+            "jobs": {"action":"jobs"}
+        },
+        "idempotency": "Use a unique key per intended request or selection. Reuse that key and body after a timeout or lost response. Existing release jobs are reused, including completed jobs; they are not sent again.",
+        "states": {
+            "in_progress":["queued", "downloading", "preparing", "ready", "sending"],
+            "smtp_accepted":"SMTP accepted the email. This is not proof the book arrived on the Kindle. Stop polling and ask the user to verify arrival.",
+            "delivered":"Delivery was confirmed by the owner.",
+            "send_uncertain":"A send may have succeeded. Stop and ask the owner to check Kindle/email; do not resubmit with a new key or retry automatically.",
+            "failed":"Report job.error.code and job.error.message. Owner intervention is required for retry.",
+            "existing_workflow":"The torrent belongs to the existing workflow. Report this; do not change its category."
+        },
+        "limits": {"requests_per_minute":c.api.requests_per_minute, "new_jobs_per_rolling_24_hours":c.api.jobs_per_day, "max_torrent_bytes":c.max_torrent_bytes, "max_request_bytes":8192},
+        "errors": {
+            "reporting":"Report the exact HTTP status and error.code/message without credentials. If the client tool prevents a call, report that tool error; do not claim the server rejected a call it never received.",
+            "rate_limited":"Wait for Retry-After seconds before retrying; preserve the submission key and body.",
+            "busy":"Wait at least 15 seconds before retrying with the same key and body.",
+            "daily_quota_exceeded":"Wait for earlier new jobs to leave the rolling 24-hour quota; status checks remain available.",
+            "forbidden":"The credential does not allow this action; ask the owner for the appropriate local CLI operation.",
+            "not_found":"For select, search first and use the returned release_id. For status, use the returned job ID."
+        }
+    })
+}
+async fn help(State(api): State<Api>, Extension(role): Extension<Role>) -> Json<Value> {
+    Json(json!({"ok":true,"data":help_document(&api.config, role)}))
+}
 async fn operation(
     State(api): State<Api>,
     Extension(role): Extension<Role>,
@@ -225,6 +285,7 @@ pub fn serve(c: Config, listen: std::net::SocketAddr) -> crate::error::Result<()
         };
         let app = Router::new()
             .route("/v1/operations", post(operation))
+            .route("/v1/help", get(help))
             .route_layer(axum::middleware::from_fn_with_state(
                 api.clone(),
                 authenticate,

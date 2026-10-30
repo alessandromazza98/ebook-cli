@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Ebook API",
-    "version": "0.2.0",
-    "description": "Bearer-authenticated ebook operations through an HTTPS reverse proxy or private tunnel. Keep one idempotency key per submission and reuse it after timeouts. SMTP acceptance is not confirmed Kindle delivery. Defaults: 30 requests/minute per credential role, 10 new API jobs per rolling 24 hours, 100 MiB per torrent. Poll status every 15\u201330 seconds. The owner credential alone permits retry and confirm_delivery."
+    "version": "0.2.1",
+    "description": "FIRST call GET /v1/help for configuration status, workflow instructions and examples. The Kindle recipient is already configured on the server; no recipient parameter is required. Search only finds books. To start a download and automatic Kindle email, call action=request or action=select and require data.job.id before claiming a job was created. Bearer-authenticated ebook operations through an HTTPS reverse proxy or private tunnel. Keep one idempotency key per submission and reuse it after timeouts. SMTP acceptance is not confirmed Kindle delivery. Defaults: 30 requests/minute per credential role, 10 new API jobs per rolling 24 hours, 100 MiB per torrent. Poll status every 15\u201330 seconds. The owner credential alone permits retry and confirm_delivery."
   },
   "servers": [
     {
@@ -36,6 +36,33 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/Operation"
+              },
+              "examples": {
+                "requestBook": {
+                  "summary": "Submit a title for download and Kindle email",
+                  "value": {
+                    "action": "request",
+                    "title": "Alice's Adventures in Wonderland",
+                    "author": "Lewis Carroll",
+                    "language": "en",
+                    "idempotency_key": "example-request-alice-unique-1"
+                  }
+                },
+                "selectRelease": {
+                  "summary": "Submit a real release ID from search; mam:12345 is a placeholder",
+                  "value": {
+                    "action": "select",
+                    "release_id": "mam:12345",
+                    "language": "en",
+                    "idempotency_key": "example-select-unique-1"
+                  }
+                },
+                "listJobs": {
+                  "summary": "Check access without creating a job",
+                  "value": {
+                    "action": "jobs"
+                  }
+                }
               }
             }
           }
@@ -160,6 +187,88 @@
               }
             }
           }
+        },
+        "summary": "Search books, submit a download-and-delivery job, or check its progress",
+        "description": "Read GET /v1/help first. search, jobs and status are read-only. request automatically selects and queues a clear match, or returns clarification_required without creating a job. select queues the chosen eligible release_id returned by search. Both submission actions require idempotency_key; reuse the key and body on transport retries. The background worker automatically downloads, prepares and emails the book to the configured Kindle. No destination address or separate send operation is needed. Check data.job.id and data.job.state; HTTP 200 alone does not mean a new job was created."
+      }
+    },
+    "/v1/help": {
+      "get": {
+        "operationId": "ebookHelp",
+        "summary": "Read first: instructions for using the ebook service",
+        "description": "Call this before requesting books. Returns Kindle-configuration status without the address, allowed actions, exact workflow and request examples, limits, and guidance for reporting failures. Read-only, authenticated, and subject to the same rate budget as operations. Performs no search, submission, download, SMTP or other dependency call.",
+        "responses": {
+          "401": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit (rate_limited, Retry-After seconds), concurrency limit (busy), or persistent rolling 24-hour new-job quota (daily_quota_exceeded). Replays of existing jobs do not consume the job quota.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait when the minute rate limit is exceeded",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Side-effect-free instructions and local configuration status; no secrets or destination email address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Help"
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -189,7 +298,8 @@
             "minLength": 1,
             "maxLength": 300
           }
-        }
+        },
+        "description": "Find and cache releases only. This action NEVER downloads, sends or creates a job. To fulfill a send request, follow with select or use request."
       },
       "select": {
         "type": "object",
@@ -217,9 +327,11 @@
           "idempotency_key": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "description": "Unique key for this intended submission. Reuse the same key and body after timeouts or lost responses."
           }
-        }
+        },
+        "description": "Start the book workflow for an eligible release returned by search or clarification candidates. Creates/reuses a job and automatically proceeds to download, preparation and Kindle email. No separate download or send action exists."
       },
       "request": {
         "type": "object",
@@ -253,9 +365,11 @@
           "idempotency_key": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "description": "Unique key for this intended submission. Reuse the same key and body after timeouts or lost responses."
           }
-        }
+        },
+        "description": "Start the book workflow from a title: automatically select a clear match and create/reuse a job, or return clarification_required. The worker handles download, EPUB preparation and email to the configured Kindle. No recipient parameter is needed."
       },
       "jobs": {
         "type": "object",
@@ -268,7 +382,8 @@
             "type": "string",
             "const": "jobs"
           }
-        }
+        },
+        "description": "List existing jobs only. Does not submit a new book."
       },
       "status": {
         "type": "object",
@@ -285,7 +400,8 @@
           "job_id": {
             "type": "string"
           }
-        }
+        },
+        "description": "Check an existing job by its returned job_id. Does not start or submit a book."
       },
       "retry": {
         "type": "object",
@@ -623,6 +739,177 @@
                   "type": "integer"
                 }
               }
+            }
+          }
+        }
+      },
+      "Help": {
+        "type": "object",
+        "required": [
+          "api_version",
+          "purpose",
+          "delivery",
+          "authentication",
+          "operations",
+          "workflow",
+          "http",
+          "examples",
+          "idempotency",
+          "states",
+          "limits",
+          "errors"
+        ],
+        "properties": {
+          "api_version": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "delivery": {
+            "type": "object",
+            "required": [
+              "configured",
+              "destination",
+              "destination_address_required_from_caller",
+              "instruction"
+            ],
+            "properties": {
+              "configured": {
+                "type": "boolean",
+                "description": "Local settings are present; no remote connectivity or delivery test is performed."
+              },
+              "destination": {
+                "type": "string",
+                "const": "server_configured_kindle"
+              },
+              "destination_address_required_from_caller": {
+                "type": "boolean",
+                "const": false
+              },
+              "instruction": {
+                "type": "string"
+              }
+            }
+          },
+          "authentication": {
+            "type": "object",
+            "required": [
+              "scheme",
+              "credential_role",
+              "allowed_actions"
+            ],
+            "properties": {
+              "scheme": {
+                "const": "Bearer"
+              },
+              "credential_role": {
+                "type": "string",
+                "enum": [
+                  "owner",
+                  "client"
+                ]
+              },
+              "allowed_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "operations": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "workflow": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "http": {
+            "type": "object",
+            "required": [
+              "method",
+              "path",
+              "content_type",
+              "client_timeout_seconds"
+            ],
+            "properties": {
+              "method": {
+                "const": "POST"
+              },
+              "path": {
+                "const": "/v1/operations"
+              },
+              "content_type": {
+                "const": "application/json"
+              },
+              "client_timeout_seconds": {
+                "type": "integer"
+              }
+            }
+          },
+          "examples": {
+            "type": "object",
+            "description": "Illustrative bodies only; replace uppercase placeholders and never submit example books unless requested.",
+            "additionalProperties": {
+              "type": "object"
+            }
+          },
+          "idempotency": {
+            "type": "string"
+          },
+          "states": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          "limits": {
+            "type": "object",
+            "required": [
+              "requests_per_minute",
+              "new_jobs_per_rolling_24_hours",
+              "max_torrent_bytes",
+              "max_request_bytes"
+            ],
+            "properties": {
+              "requests_per_minute": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "new_jobs_per_rolling_24_hours": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_torrent_bytes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_request_bytes": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
             }
           }
         }
