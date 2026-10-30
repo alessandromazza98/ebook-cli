@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """CLI integration checks against a local qBittorrent stub; never sends email."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from email.parser import BytesParser
+from email.policy import default
 import argparse
 import hashlib
 import json
@@ -31,14 +33,17 @@ def main(binary):
                 self.end_headers()
                 self.wfile.write(data)
             def do_POST(self):
-                self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 if self.path.endswith('/login'):
                     if added:
                         self.send_response(204); self.end_headers()
                     else:
                         self.answer('Ok.')
                 elif self.path.endswith('/add'):
-                    added.append(1)
+                    headers = ('Content-Type: '+self.headers['Content-Type']+'\r\n\r\n').encode()
+                    form = BytesParser(policy=default).parsebytes(headers+body)
+                    added.append({part.get_param('name', header='content-disposition'): part.get_payload(decode=True)
+                                  for part in form.iter_parts()})
                     # Accepted request, lost response: next tick must reconcile.
                     self.connection.shutdown(socket.SHUT_RDWR)
                     self.connection.close()
@@ -90,6 +95,7 @@ def main(binary):
         assert cli('status',job_id)['data']['job']['state'] == 'queued'
         cli('worker','--once')
         assert len(added)==1
+        assert added[0]['seedingTimeLimit']==b'-2', 'New torrents must inherit the global seeding duration'
         assert cli('status',job_id)['data']['job']['state'] == 'downloading'
         cli('worker','--once'); cli('worker','--once')
         assert cli('status',job_id)['data']['job']['state'] == 'ready'
@@ -200,7 +206,7 @@ def main(binary):
         assert len(spec['components']['schemas']['Operation']['oneOf'])==5
         assert 'retry' not in spec['components']['schemas']
         assert not (root/'escape').exists()
-        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi','authenticated_help','help_excludes_secrets','help_creates_no_jobs']}))
+        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','qbittorrent_seeding_time_inherits_global','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi','authenticated_help','help_excludes_secrets','help_creates_no_jobs']}))
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description=__doc__)

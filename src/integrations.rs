@@ -388,7 +388,7 @@ impl<'a> Qb<'a> {
             .text("autoTMM", "false")
             .text("skip_checking", "false")
             .text("ratioLimit", "-1")
-            .text("seedingTimeLimit", "-1")
+            .text("seedingTimeLimit", "-2") // Inherit qBittorrent's global duration.
             .text("inactiveSeedingTimeLimit", "-1");
         let r = self
             .http

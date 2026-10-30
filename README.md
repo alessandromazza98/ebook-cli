@@ -269,6 +269,16 @@ Upstream references: [Kindling](https://github.com/ciscoriordan/kindling),
 [original fixes](https://github.com/innocenat/kindle-epub-fix),
 [CWA](https://github.com/crocodilestick/Calibre-Web-Automated).
 
+## Seeding duration
+
+New ebook torrents inherit qBittorrent's global seeding-time limit. Configure it
+under **Options → BitTorrent → Seeding Limits**; 14 days is 20,160 minutes.
+Existing torrents with a custom limit must be changed to use the global limit.
+The action selected there controls what happens at the limit: **Stop torrent**
+keeps the torrent and its downloaded files. Ebook delivery does not delete them.
+Time already spent seeding counts toward the limit, including time waiting for
+peers. Time spent stopped does not count.
+
 ## License and verification
 
 The application is MIT licensed and free to use, modify and redistribute.
