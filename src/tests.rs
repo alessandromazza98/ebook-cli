@@ -263,3 +263,94 @@ fn qbittorrent_add_acknowledgements_validate_counts_and_identity() {
         "abc"
     ));
 }
+
+#[test]
+fn api_quota_is_persistent_atomic_and_does_not_charge_replays() {
+    let t = tempfile::tempdir().unwrap();
+    let c = config(t.path());
+    let mut db = Db::open(&c).unwrap();
+    let job = db.submit_limited("mam:1", "en", "one", Some(1)).unwrap();
+    assert_eq!(
+        db.submit_limited("mam:1", "en", "one", Some(1)).unwrap().id,
+        job.id
+    );
+    assert_eq!(
+        db.submit_limited("mam:1", "en", "other", Some(1))
+            .unwrap()
+            .id,
+        job.id
+    );
+    drop(db);
+    let mut db = Db::open(&c).unwrap();
+    assert_eq!(
+        db.submit_limited("mam:2", "en", "two", Some(1))
+            .unwrap_err()
+            .code,
+        "daily_quota_exceeded"
+    );
+    assert_eq!(db.jobs().unwrap().len(), 1);
+    db.0.execute(
+        "UPDATE api_submissions SET created_at=unixepoch()-86401",
+        [],
+    )
+    .unwrap();
+    db.submit_limited("mam:2", "en", "two", Some(1)).unwrap();
+    // Independent connections serialize quota checks and insertion in one transaction.
+    db.0.execute("DELETE FROM api_submissions", []).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let threads: Vec<_> = (3..5)
+        .map(|n| {
+            let c = c.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut db = Db::open(&c).unwrap();
+                barrier.wait();
+                db.submit_limited(&format!("mam:{n}"), "en", &format!("key-{n}"), Some(1))
+                    .is_ok()
+            })
+        })
+        .collect();
+    assert_eq!(
+        threads
+            .into_iter()
+            .filter_map(|t| t.join().unwrap().then_some(()))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn torrent_download_size_checks_single_and_multi_file_lengths() {
+    let single = b"d4:infod6:lengthi5e4:name1:x6:pieces0:ee";
+    assert!(torrent::validate_download(single, 5).is_ok());
+    assert_eq!(
+        torrent::validate_download(single, 4).unwrap_err().code,
+        "download_too_large"
+    );
+    let multi = b"d4:infod5:filesld6:lengthi3e4:pathl1:aeed6:lengthi4e4:pathl1:beee6:pieces0:ee";
+    assert!(torrent::validate_download(multi, 7).is_ok());
+    assert_eq!(
+        torrent::validate_download(multi, 6).unwrap_err().code,
+        "download_too_large"
+    );
+    for malformed in [
+        b"d4:infod6:pieces0:ee".as_slice(),
+        b"d4:infod6:lengthi-1e6:pieces0:ee",
+        b"d4:infod6:lengthi0e6:pieces0:ee",
+        b"d4:infod5:filesle6:lengthi1e6:pieces0:ee",
+        b"d4:infod5:filesld4:pathl1:aeee6:pieces0:ee",
+        b"d4:infod5:filesld6:lengthi9223372036854775807eed6:lengthi9223372036854775807eed6:lengthi9223372036854775807eee6:pieces0:ee",
+    ] { assert!(torrent::validate_download(malformed, u64::MAX).is_err()); }
+}
+
+#[test]
+fn legacy_config_defaults_to_safe_api_limits() {
+    let mut value = serde_json::to_value(Config::example()).unwrap();
+    value.as_object_mut().unwrap().remove("api");
+    value.as_object_mut().unwrap().remove("max_torrent_bytes");
+    let c: Config = serde_json::from_value(value).unwrap();
+    assert!(c.api.client_token.is_none());
+    assert_eq!(c.api.requests_per_minute, 30);
+    assert_eq!(c.api.jobs_per_day, 10);
+    assert_eq!(c.max_torrent_bytes, 100 * 1024 * 1024);
+}

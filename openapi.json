@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Private Ebook API",
-    "version": "0.1.0",
-    "description": "Loopback listener accessed through an authenticated SSH tunnel. SMTP acceptance requires separate user delivery confirmation."
+    "title": "Ebook API",
+    "version": "0.2.0",
+    "description": "Bearer-authenticated ebook operations through an HTTPS reverse proxy or private tunnel. Keep one idempotency key per submission and reuse it after timeouts. SMTP acceptance is not confirmed Kindle delivery. Defaults: 30 requests/minute per credential role, 10 new API jobs per rolling 24 hours, 100 MiB per torrent. Poll status every 15\u201330 seconds. The owner credential alone permits retry and confirm_delivery."
   },
   "servers": [
     {
@@ -102,11 +102,20 @@
             }
           },
           "429": {
-            "description": "Structured ebook result or failure",
+            "description": "Rate limit (rate_limited, Retry-After seconds), concurrency limit (busy), or persistent rolling 24-hour new-job quota (daily_quota_exceeded). Replays of existing jobs do not consume the job quota.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait when the minute rate limit is exceeded",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
                 }
               }
             }
@@ -133,6 +142,16 @@
           },
           "408": {
             "description": "Structured ebook result or failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Credential does not permit this operation",
             "content": {
               "application/json": {
                 "schema": {
@@ -287,7 +306,8 @@
             "type": "boolean",
             "default": false
           }
-        }
+        },
+        "description": "Requires the owner credential; restricted clients receive HTTP 403."
       },
       "confirm_delivery": {
         "type": "object",
@@ -304,7 +324,8 @@
           "job_id": {
             "type": "string"
           }
-        }
+        },
+        "description": "Requires the owner credential; restricted clients receive HTTP 403."
       },
       "Operation": {
         "oneOf": [

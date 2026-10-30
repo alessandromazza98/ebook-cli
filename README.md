@@ -164,36 +164,85 @@ platform as appropriate. Back up the private config and SQLite using SQLite's ba
 Do not copy only a live SQLite main file. Retain `.torrent` files and processing
 copies for restart recovery. There is no automatic retention/deletion policy.
 
-## Private API and future Instinct integration
+## HTTPS API and Instinct integration
 
-Instinct integration is deferred to a future product version. The current
-release provides a standalone CLI and an optional private API; no Instinct,
-WhatsApp account or AI service is required.
+The API shares the CLI's application core and needs no AI service. Instinct or
+another agent must support HTTPS JSON requests, bearer authentication and secure
+credential storage. `openapi.json` documents the full contract. The server stays
+on `127.0.0.1:8791`; expose it through the Apache example in
+`deploy/apache-ebook.conf`, or access it using an authenticated SSH tunnel.
 
-`openapi.json` documents `POST /v1/operations`. The server binds only to loopback
-and requires `Authorization: Bearer TOKEN`. Tokens are compared in constant time;
-requests are limited to 8 KiB and two concurrent operations. It exposes only the
-same ebook operations, with no filesystem, shell or arbitrary-URL endpoints.
-`GET /health/live` checks the HTTP process without depending on MAM/SMTP.
+Keep `api_token` as the owner's credential. Add this optional configuration for
+a restricted client (generate a fresh random token, at least 32 characters):
 
-For a client on a host you control, the existing private API can be accessed
-through an authenticated SSH tunnel:
-
-```sh
-ssh -N -L 8791:127.0.0.1:8791 ebook@YOUR_SERVER
+```json
+"api": {
+  "client_token": "REPLACE_WITH_A_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS",
+  "requests_per_minute": 30,
+  "jobs_per_day": 10
+},
+"max_torrent_bytes": 104857600
 ```
 
-Store the token in the client's secret store, never in a URL or source file. Point
-the OpenAPI client at `http://127.0.0.1:8791`; use a 120-second client
-deadline. Example request body:
+The restricted token permits `search`, `request`, `select`, `jobs` and `status`.
+It cannot retry a send or confirm Kindle delivery. Use the local CLI for those
+actions. Both credentials use `Authorization: Bearer TOKEN`; store the client's
+token in its secret store, outside prompts, chat messages, URLs and source files.
+To revoke access, set `api.client_token` to null and restart `ebook-api`. To
+rotate it, replace that value and update the client's secret store. In-flight
+jobs remain queued after revocation; inspect them separately if compromise is
+suspected. Never share the full server configuration with the client.
+
+Authentication runs before JSON parsing. Requests are limited to 8 KiB, two
+concurrent operations, and a sliding minute budget per credential role. The
+minute budget resets on API restart. The new-job quota uses a SQLite transaction
+and a rolling 24-hour window; it survives restarts and token rotation. Existing
+job replays cost no additional job quota. CLI submissions are outside the API
+quota. Torrent sizes are checked against both tracker metadata and actual
+metainfo before adding to qBittorrent. The download cap applies to CLI jobs too.
+Existing downloads and seeded sources are preserved. Defaults work with old
+configuration files; client access stays disabled until its token is configured.
+
+For Apache deployment:
+
+1. Point the chosen hostname at the server, and confirm ports 80/443 reach
+   Apache. Keep port 8791 local. Create `/var/lib/ebook-cli/acme` for ACME challenges
+   and `/var/lib/ebook-cli/public` for the public schema, outside the source tree.
+2. Adapt `deploy/apache-ebook.conf` to the hostname. Initially enable only its
+   HTTP vhost, then obtain a certificate with Certbot's webroot authenticator:
+   `certbot certonly --webroot -w /var/lib/ebook-cli/acme -d ebook.example.com`.
+3. Export the restricted client's contract with
+   `python3 scripts/export-openapi.py --server https://ebook.example.com --output /var/lib/ebook-cli/public/openapi.json`.
+   Enable the HTTPS vhost only after API tests pass. Run `apache2ctl configtest`
+   before reloading Apache. Set a Certbot deploy hook to test and reload Apache
+   after renewing this certificate, and verify renewal with `certbot renew
+   --cert-name ebook.example.com --dry-run`.
+4. Register `https://ebook.example.com/openapi.json` in the agent's tool settings
+   and supply the restricted token through its secret store. Use a 130-second
+   client deadline. The Apache example proxies only `POST /v1/operations` and
+   serves the public schema; plain HTTP serves only certificate challenges.
+
+Proxy access logs contain method, path, status and timing, excluding headers,
+query strings and bodies. API events contain operation names, job IDs and error
+codes, excluding book queries and credentials. The Apache example excludes
+headers/bodies from ModSecurity audit logs while preserving inherited rules;
+review any locally customized logging before deployment. Liveness remains local
+at `/health/live` and does not depend on MAM, qBittorrent or SMTP.
+
+Example request body:
 
 ```json
 {"action":"request","title":"Alice's Adventures in Wonderland","author":"Lewis Carroll","language":"en","idempotency_key":"client-alice-1"}
 ```
 
-Resolve `clarification_required` by calling `select`; poll `status` for its job.
-The server and contract are usable independently. No public HTTPS endpoint, DNS,
-firewall or existing reverse-proxy route is changed.
+Use one unique idempotency key per intended submission and reuse it after a lost
+response or timeout. Resolve `clarification_required` by asking the user to
+choose and calling `select`; poll `status` every 15–30 seconds for the returned
+job ID. Follow `Retry-After` on minute-limit responses. A `daily_quota_exceeded`
+error requires waiting for earlier new jobs to leave the rolling 24-hour window.
+Never claim Kindle delivery from `smtp_accepted`; the user confirms receipt.
+No callback URL, arbitrary destination email, shell or filesystem operation is
+exposed. Instinct registration and credentials are configured on its side.
 
 To roll back, stop/disable only `ebook-worker` and `ebook-api`. Leave source
 torrents seeding. Chaptarr and CWA continue using their existing configuration.

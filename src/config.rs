@@ -15,6 +15,29 @@ pub struct Config {
     pub qbittorrent: Qbit,
     pub smtp: Smtp,
     pub api_token: String,
+    #[serde(default)]
+    pub api: ApiConfig,
+    #[serde(default = "default_max_torrent_bytes")]
+    pub max_torrent_bytes: u64,
+}
+fn default_max_torrent_bytes() -> u64 {
+    100 * 1024 * 1024
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiConfig {
+    pub client_token: Option<String>,
+    pub requests_per_minute: u32,
+    pub jobs_per_day: u32,
+}
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            client_token: None,
+            requests_per_minute: 30,
+            jobs_per_day: 10,
+        }
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +95,8 @@ impl Config {
                 kindle: String::new(),
             },
             api_token: uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string(),
+            api: ApiConfig::default(),
+            max_torrent_bytes: default_max_torrent_bytes(),
         }
     }
     pub fn load(path: &Path) -> Result<Self> {
@@ -86,6 +111,23 @@ impl Config {
         Ok(c)
     }
     pub fn validate(&self) -> Result<()> {
+        if self.api.client_token.as_ref().is_some_and(|token| {
+            token.len() < 32
+                || token == &self.api_token
+                || !token.bytes().all(|b| b.is_ascii_graphic())
+        }) {
+            return Err(Error::invalid(
+                "API client token must be distinct from the owner token and contain 32+ visible ASCII characters",
+            ));
+        }
+        if !(1..=600).contains(&self.api.requests_per_minute)
+            || !(1..=100).contains(&self.api.jobs_per_day)
+            || !(1..=1024 * 1024 * 1024).contains(&self.max_torrent_bytes)
+        {
+            return Err(Error::invalid(
+                "API limits must be 1–600 requests/minute, 1–100 jobs/day, and 1 byte–1 GiB per torrent",
+            ));
+        }
         let q = &self.qbittorrent;
         if q.category != "ebook-cli" {
             return Err(Error::invalid(

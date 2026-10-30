@@ -41,6 +41,8 @@ impl Db {
           CREATE TABLE IF NOT EXISTS submissions(key TEXT PRIMARY KEY, payload TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id));
           CREATE TABLE IF NOT EXISTS deliveries(digest TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id));
           CREATE TABLE IF NOT EXISTS failures(job_id TEXT PRIMARY KEY REFERENCES jobs(id), count INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS api_submissions(job_id TEXT PRIMARY KEY REFERENCES jobs(id), created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+          CREATE INDEX IF NOT EXISTS api_submissions_created_at ON api_submissions(created_at);
           PRAGMA user_version=1;")?;
         Ok(Self(conn))
     }
@@ -61,6 +63,15 @@ impl Db {
         .map_err(Into::into)
     }
     pub fn submit(&mut self, release: &str, lang: &str, key: &str) -> Result<Job> {
+        self.submit_limited(release, lang, key, None)
+    }
+    pub fn submit_limited(
+        &mut self,
+        release: &str,
+        lang: &str,
+        key: &str,
+        daily_limit: Option<u32>,
+    ) -> Result<Job> {
         if key.is_empty() || key.len() > 128 {
             return Err(Error::invalid(
                 "Idempotency key must contain 1–128 characters",
@@ -101,6 +112,20 @@ impl Db {
             }
             id
         } else {
+            if let Some(limit) = daily_limit {
+                let count: u32 = tx.query_row(
+                    "SELECT count(*) FROM api_submissions WHERE created_at > unixepoch()-86400",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if count >= limit {
+                    return Err(Error::new(
+                        "daily_quota_exceeded",
+                        "API new-book limit reached for the last 24 hours; existing jobs can still be checked",
+                        5,
+                    ));
+                }
+            }
             let active:i64=tx.query_row("SELECT count(*) FROM jobs WHERE state IN ('queued','downloading','preparing','ready','sending')",[],|r|r.get(0))?;
             if active >= 20 {
                 return Err(Error::conflict(
@@ -109,6 +134,9 @@ impl Db {
             }
             let id = uuid::Uuid::new_v4().to_string();
             tx.execute("INSERT INTO jobs(id,release_id,language,state,message_id) VALUES(?1,?2,?3,'queued',?4)", params![id,release,lang,format!("<{id}@ebook-cli.local>")])?;
+            if daily_limit.is_some() {
+                tx.execute("INSERT INTO api_submissions(job_id) VALUES(?1)", [&id])?;
+            }
             id
         };
         tx.execute(

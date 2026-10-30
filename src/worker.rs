@@ -118,6 +118,7 @@ fn step(c: &Config, db: &Db, j: &Job) -> Result<()> {
                 data
             };
             let hash = torrent::info_hash(&data)?;
+            torrent::validate_download(&data, c.max_torrent_bytes)?;
             db.hash(&j.id, &hash)?;
             if let Some(existing) = qb.info(&hash)? {
                 qb.owned(&existing)?;

@@ -64,6 +64,7 @@ def main():
             'qbittorrent':{'url':f'http://127.0.0.1:{server.server_port}','username':'test','password':'test','category':'ebook-cli','remote_dir':'/downloads/books/ebook-cli','local_dir':str(root/'ebook-cli')},
             'smtp':{'host':'127.0.0.1','port':1,'tls':'starttls','username':'','password':'','from':'test@example.com','kindle':'kindle@example.com'},
             'api_token':'test-only-'+'a'*64,
+            'api':{'client_token':'test-client-'+'b'*64,'requests_per_minute':12,'jobs_per_day':1},
         }
         cfg = root/'config.json'
         cfg.write_text(json.dumps(config)); cfg.chmod(0o600)
@@ -109,6 +110,14 @@ def main():
         cli('worker','--once')
         assert cli('status',second)['data']['job']['state']=='existing_workflow'
         assert len(added)==1
+        # Tracker size cannot bypass the cap on the actual torrent contents.
+        oversized = str(uuid.uuid4())
+        conn.execute("INSERT INTO jobs(id,release_id,language,state,message_id) VALUES(?,?,'en','queued',?)",(oversized,'mam:6',f'<{oversized}@test>')); conn.commit()
+        (root/f'state/{oversized}.torrent').write_bytes(metainfo.replace(b'lengthi5e',b'lengthi104857601e'))
+        cli('worker','--once')
+        rejected = cli('status',oversized)['data']['job']
+        assert rejected['state']=='failed' and rejected['error']['code']=='download_too_large'
+        assert len(added)==1
         # Run the real HTTP server and verify auth/schema/contract boundaries.
         with socket.socket() as s:
             s.bind(('127.0.0.1',0)); port=s.getsockname()[1]
@@ -125,18 +134,56 @@ def main():
                 req=urllib.request.Request(base+'/v1/operations',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
                 try:
                     with urllib.request.urlopen(req,timeout=10) as r: result=json.load(r); actual=r.status
-                except urllib.error.HTTPError as e: actual=e.code; result=json.load(e)
+                except urllib.error.HTTPError as e:
+                    actual=e.code; result=json.load(e)
+                    if result['error']['code']=='rate_limited': assert 1<=int(e.headers['Retry-After'])<=60
                 assert actual==status,(actual,status,result)
                 return result
             request({'action':'jobs'},'wrong',401)
-            assert len(request({'action':'jobs'},config['api_token'],200)['data']['jobs'])==2
+            assert len(request({'action':'jobs'},config['api_token'],200)['data']['jobs'])==3
             request({'action':'shell','command':'id'},config['api_token'],400)
             request({'action':'jobs','extra':'x'},config['api_token'],400)
+            request({'action':'search','query':'x'*9000},config['api_token'],400)
+            # Auth runs before JSON extraction, and restricted tokens cannot resend.
+            req=urllib.request.Request(base+'/v1/operations',data=b'not-json',headers={'Content-Type':'application/json'})
+            try:
+                urllib.request.urlopen(req,timeout=10)
+                raise AssertionError('Missing auth accepted')
+            except urllib.error.HTTPError as e:
+                assert e.code==401 and json.load(e)['error']['code']=='unauthorized'
+            client=config['api']['client_token']
+            request({'action':'jobs'},client,200)
+            request({'action':'retry','job_id':job_id,'acknowledge_possible_duplicate':True},client,403)
+            request({'action':'confirm_delivery','job_id':job_id},client,403)
+            request({'action':'select','release_id':'mam:1','idempotency_key':'api-existing'},client,200)
+            for n in (3,4,5):
+                release['id']=f'mam:{n}'
+                release['size_bytes']=200*1024*1024 if n==5 else len(source)
+                conn.execute('INSERT INTO releases VALUES (?,?)',(release['id'],json.dumps(release)))
+            conn.commit()
+            body={'action':'select','release_id':'mam:3','idempotency_key':'api-new'}
+            selected=request(body,client,200)['data']['job']['id']
+            assert request(body,client,200)['data']['job']['id']==selected
+            assert request({'action':'select','release_id':'mam:4','idempotency_key':'api-over-quota'},client,429)['error']['code']=='daily_quota_exceeded'
+            assert request({'action':'select','release_id':'mam:5','idempotency_key':'api-large'},client,422)['error']['code']=='download_too_large'
+            request({'action':'jobs','extra':'x'},client,400)
+            for _ in range(3): request({'action':'jobs'},client,200)
+            assert request({'action':'jobs'},client,429)['error']['code']=='rate_limited'
+            request({'action':'jobs'},config['api_token'],200) # Separate owner rate budget.
+            assert conn.execute('SELECT count(*) FROM api_submissions').fetchone()[0]==1
+            assert conn.execute('SELECT count(*) FROM deliveries').fetchone()[0]==0
         finally:
             api.terminate(); api.wait(timeout=10)
             server.shutdown(); server.server_close(); conn.close()
         cli('serve','--listen','0.0.0.0:8791',code=2)
+        schema=root/'openapi.json'
+        subprocess.run(['python3',str(ROOT/'scripts/export-openapi.py'),'--server','https://ebook.example.com','--output',str(schema)],check=True,timeout=10)
+        spec=json.loads(schema.read_text())
+        assert spec['servers']==[{'url':'https://ebook.example.com'}]
+        assert list(spec['paths'])==['/v1/operations']
+        assert len(spec['components']['schemas']['Operation']['oneOf'])==5
+        assert 'retry' not in spec['components']['schemas']
         assert not (root/'escape').exists()
-        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only']}))
+        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi']}))
 
 if __name__=='__main__': main()

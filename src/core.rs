@@ -45,8 +45,22 @@ fn cached_search(c: &Config, db: &Db, query: &str) -> Result<Value> {
     }
     Ok(value)
 }
-fn submit(db: &mut Db, id: &str, lang: Option<&str>, key: &str) -> Result<Value> {
+fn submit(
+    c: &Config,
+    db: &mut Db,
+    id: &str,
+    lang: Option<&str>,
+    key: &str,
+    daily_limit: Option<u32>,
+) -> Result<Value> {
     let release = db.release(id)?;
+    if release.size_bytes > c.max_torrent_bytes {
+        return Err(Error::new(
+            "download_too_large",
+            "Release exceeds the configured torrent download limit",
+            6,
+        ));
+    }
     if !release.eligible {
         return Err(Error::new(
             "release_restricted",
@@ -59,9 +73,16 @@ fn submit(db: &mut Db, id: &str, lang: Option<&str>, key: &str) -> Result<Value>
         .transpose()?
         .or(release.language)
         .ok_or_else(|| Error::new("clarification_required", "Specify a release language", 3))?;
-    Ok(json!({"job":db.submit(id,&l,key)?}))
+    let job = match daily_limit {
+        Some(limit) => db.submit_limited(id, &l, key, Some(limit))?,
+        None => db.submit(id, &l, key)?,
+    };
+    Ok(json!({"job":job}))
 }
 pub fn execute(c: &Config, action: Action) -> Result<Value> {
+    execute_limited(c, action, None)
+}
+pub fn execute_limited(c: &Config, action: Action, daily_limit: Option<u32>) -> Result<Value> {
     let mut db = Db::open(c)?;
     match action {
         Action::Search { query } => cached_search(c, &db, &query),
@@ -69,7 +90,14 @@ pub fn execute(c: &Config, action: Action) -> Result<Value> {
             release_id,
             language,
             idempotency_key,
-        } => submit(&mut db, &release_id, language.as_deref(), &idempotency_key),
+        } => submit(
+            c,
+            &mut db,
+            &release_id,
+            language.as_deref(),
+            &idempotency_key,
+            daily_limit,
+        ),
         Action::Request {
             title,
             author,
@@ -82,10 +110,12 @@ pub fn execute(c: &Config, action: Action) -> Result<Value> {
                 selection::choose(&releases, &title, author.as_deref(), language.as_deref())?;
             if selected["status"] == "selected" {
                 let mut out = submit(
+                    c,
                     &mut db,
                     selected["release_id"].as_str().unwrap(),
                     selected["language"].as_str(),
                     &idempotency_key,
+                    daily_limit,
                 )?;
                 out["selection"] = selected;
                 Ok(out)
