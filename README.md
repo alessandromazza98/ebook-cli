@@ -26,6 +26,9 @@ install -m 0755 target/debug/ebook bin/ebook
 bin/ebook --config config.json setup
 ```
 
+The optional `scripts/cargo` helper uses Cargo from your PATH. It also supports
+existing isolated installations under `.toolchain/` when present.
+
 The template uses `/srv/ebook-cli/state` and `/srv/ebook-cli/processing` for
 persistent state and working copies. Change them to absolute paths writable by
 the account running the CLI, or create those directories with that ownership.
