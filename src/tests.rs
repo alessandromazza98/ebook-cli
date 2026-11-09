@@ -202,6 +202,62 @@ fn mam_metadata_restrictions_and_malformed_data() {
     bad["seeders"] = json!("invalid");
     assert!(parse_release(&bad, true).is_err());
 }
+
+#[test]
+fn mam_zero_result_response_is_empty_and_allows_automatic_fallback() {
+    use crate::{
+        core::{Source, search_sources},
+        integrations::mam_search_rows,
+    };
+    let upstream = json!({"error":"Nothing returned, out of 0"});
+    assert!(mam_search_rows(&upstream).unwrap().is_empty());
+    assert!(
+        mam_search_rows(&json!({"data":[],"found":0}))
+            .unwrap()
+            .is_empty()
+    );
+    let result = search_sources(
+        Source::Auto,
+        "Missing book",
+        None,
+        None,
+        || {
+            let rows = mam_search_rows(&upstream)?;
+            assert!(rows.is_empty());
+            Ok(search_result(&[]))
+        },
+        || Ok(search_result(&[])),
+    )
+    .unwrap();
+    assert_eq!(result["sources_searched"], json!(["mam", "zlibrary"]));
+    assert!(result["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn mam_empty_result_handling_preserves_real_errors_and_rejects_conflicting_payloads() {
+    use crate::integrations::mam_search_rows;
+    for data in [
+        json!({}),
+        json!({"data":null}),
+        json!({"data":"invalid"}),
+        json!({"error":"Session expired"}),
+        json!({"error":"Session expired","data":[]}),
+        json!({"error":"Nothing returned, out of 10"}),
+        json!({"error":"Nothing returned, out of 0","data":[]}),
+        json!({"error":{"message":"Nothing returned, out of 0"}}),
+    ] {
+        assert_eq!(
+            mam_search_rows(&data).unwrap_err().code,
+            "invalid_upstream_response"
+        );
+    }
+    assert_eq!(
+        mam_search_rows(&json!({"data":[{"id":42}],"found":1}))
+            .unwrap()
+            .len(),
+        1
+    );
+}
 #[test]
 fn metainfo_hash_validation() {
     assert!(torrent::info_hash(b"d4:infod6:pieces0:ee").is_ok());

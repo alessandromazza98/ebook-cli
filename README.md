@@ -118,6 +118,9 @@ metadata, or match when punctuation and spacing are removed (such as JRR versus
 J. R. R.). Plausible ambiguous MAM matches stay on MAM and require clarification.
 Automatic selection remains conservative and requires exact title/author matches.
 A MAM error is reported rather than interpreted as an empty search.
+MAM's exact empty-search response, `{"error":"Nothing returned, out of 0"}`,
+is normalized to zero results so fallback can run. Other errors and malformed
+responses remain failures; they are not evidence that no book exists.
 
 Use `--source zlibrary` whenever Z-Library is explicitly requested; this skips
 MAM entirely. `--source mam` disables fallback. Search accepts optional `--author`

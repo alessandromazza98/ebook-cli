@@ -221,6 +221,31 @@ pub fn parse_release(v: &Value, vip: bool) -> Result<Release> {
 fn cookie(c: &Config) -> String {
     format!("mam_id={}; mam_ssl=1", c.mam.session)
 }
+pub(crate) fn mam_search_rows(data: &Value) -> Result<&[Value]> {
+    // MAM represents a successful zero-hit search as this error-only object.
+    if data.as_object().is_some_and(|o| o.len() == 1)
+        && data["error"] == "Nothing returned, out of 0"
+    {
+        return Ok(&[]);
+    }
+    if data
+        .get("error")
+        .is_some_and(|e| !e.is_null() && e != false && e != "")
+    {
+        return Err(Error::new(
+            "invalid_upstream_response",
+            "MAM reported a search error; check session/account and upstream status",
+            4,
+        ));
+    }
+    data["data"].as_array().map(Vec::as_slice).ok_or_else(|| {
+        Error::new(
+            "invalid_upstream_response",
+            "MAM search data is missing; check session/account",
+            4,
+        )
+    })
+}
 pub fn search(c: &Config, query: &str) -> Result<Value> {
     search_until(
         c,
@@ -255,13 +280,7 @@ pub fn search_until(c: &Config, query: &str, deadline: std::time::Instant) -> Re
                     4,
                 )
             })?;
-        let rows = data["data"].as_array().ok_or_else(|| {
-            Error::new(
-                "invalid_upstream_response",
-                "MAM search data is missing; check session/account",
-                4,
-            )
-        })?;
+        let rows = mam_search_rows(&data)?;
         total = data["found"]
             .as_u64()
             .or_else(|| data["found"].as_str().and_then(|s| s.parse().ok()))
