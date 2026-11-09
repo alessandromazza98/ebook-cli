@@ -8,12 +8,15 @@ use crate::{
 use reqwest::{
     Url,
     blocking::{Client, RequestBuilder, Response},
+    cookie::Jar,
 };
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
 use std::{
     fs,
     io::{Read, Write},
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -56,20 +59,22 @@ pub fn configured(c: &Config) -> Result<&Zlibrary> {
         )
     })
 }
-fn client() -> Result<Client> {
-    Client::builder()
+fn client() -> Result<(Client, Arc<Jar>)> {
+    let cookies = Arc::new(Jar::default());
+    let http = Client::builder()
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
-        .cookie_store(true)
+        .cookie_provider(cookies.clone())
         .user_agent(concat!("ebook-cli/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|_| Error::dependency("Z-Library HTTP client"))
+        .map_err(|_| unavailable("Z-Library HTTP client"))?;
+    Ok((http, cookies))
 }
 fn guest_blocked() -> Error {
     Error::new(
         "zlibrary_guest_blocked",
-        "Z-Library is requiring a browser check; guest downloads are unavailable from this server. No file was sent",
+        "Z-Library's guest check could not be completed; no file was sent",
         4,
     )
 }
@@ -243,8 +248,9 @@ pub fn search(c: &Config, query: &str, deadline: Instant) -> Result<Value> {
     let url = origin(&z.base_url)?
         .join("eapi/book/search")
         .map_err(|_| malformed())?;
+    let (http, _) = client()?;
     let data = metadata(
-        client()?.post(url).form(&[
+        http.post(url).form(&[
             ("message", query),
             ("extensions[]", "epub"),
             ("page", "1"),
@@ -291,20 +297,99 @@ pub(crate) fn download_url(z: &Zlibrary, input: &str) -> Result<Url> {
     {
         return Err(Error::new(
             "unsafe_download_url",
-            "Z-Library download host or redirect is not trusted; the owner must verify any additional download host",
+            format!(
+                "Z-Library download host {} is not trusted; the owner must verify any additional download host",
+                url.host_str().unwrap_or("<missing>")
+            ),
             6,
         ));
     }
     Ok(url)
 }
-fn file_response(http: &Client, z: &Zlibrary, mut url: Url, deadline: Instant) -> Result<Response> {
-    for _ in 0..=3 {
+// This is the site's guest SHA-1 proof-of-work protocol, not a JavaScript evaluator.
+// Reject unfamiliar scripts rather than executing remote code or guessing cookie values.
+pub(crate) fn guest_challenge(body: &[u8]) -> Option<String> {
+    if body.len() > 65536 {
+        return None;
+    }
+    let body = std::str::from_utf8(body).ok()?;
+    for marker in [
+        "Checking your browser",
+        "let n1=parseInt('0x'+c[0x0])",
+        "s[n1]===0xb0",
+        "s[n1+0x1]===0xb",
+        "c_time=",
+        "window.location.reload()",
+        "JS_SHA1_NO_NODE_JS",
+    ] {
+        if !body.contains(marker) {
+            return None;
+        }
+    }
+    let pattern =
+        regex::Regex::new(r"const\s+\w+=\['([A-Za-z0-9_-]{32,512})','c_token=','array'\]")
+            .expect("static guest challenge pattern");
+    let mut captures = pattern.captures_iter(body);
+    let challenge = captures.next()?.get(1)?.as_str();
+    if captures.next().is_some() || !challenge.as_bytes()[0].is_ascii_hexdigit() {
+        return None;
+    }
+    Some(challenge.to_owned())
+}
+pub(crate) fn guest_proof(challenge: &str, deadline: Instant) -> Result<(String, Duration)> {
+    if !(32..=512).contains(&challenge.len())
+        || !challenge
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(guest_blocked());
+    }
+    let index = challenge
+        .chars()
+        .next()
+        .and_then(|c| c.to_digit(16))
+        .ok_or_else(guest_blocked)? as usize;
+    let start = Instant::now();
+    let deadline = deadline.min(start + Duration::from_secs(5));
+    let mut prefix = Sha1::new();
+    prefix.update(challenge.as_bytes());
+    for nonce in 0..1_000_000u32 {
+        if nonce % 1024 == 0 && Instant::now() >= deadline {
+            return Err(guest_blocked());
+        }
+        let suffix = nonce.to_string();
+        let mut hash = prefix.clone();
+        hash.update(suffix.as_bytes());
+        let digest = hash.finalize();
+        if digest[index] == 0xb0 && digest[index + 1] == 0x0b {
+            return Ok((format!("{challenge}{suffix}"), start.elapsed()));
+        }
+    }
+    Err(guest_blocked())
+}
+fn file_response(
+    http: &Client,
+    cookies: &Jar,
+    z: &Zlibrary,
+    mut url: Url,
+    deadline: Instant,
+) -> Result<Response> {
+    let mut redirects = 0;
+    let mut verified = false;
+    loop {
         let response = http
             .get(url.clone())
             .timeout(remaining(deadline, Duration::from_secs(60))?)
             .send()
             .map_err(|_| unavailable("Z-Library guest download"))?;
         if response.status().is_redirection() {
+            if redirects == 3 {
+                return Err(Error::new(
+                    "unsafe_download_url",
+                    "Z-Library exceeded the limit of three download redirects",
+                    6,
+                ));
+            }
             let location = response
                 .headers()
                 .get(reqwest::header::LOCATION)
@@ -312,6 +397,7 @@ fn file_response(http: &Client, z: &Zlibrary, mut url: Url, deadline: Instant) -
                 .ok_or_else(malformed)?;
             let next = url.join(location).map_err(|_| malformed())?;
             url = download_url(z, next.as_str())?;
+            redirects += 1;
             continue;
         }
         if response.status() != reqwest::StatusCode::OK
@@ -324,9 +410,23 @@ fn file_response(http: &Client, z: &Zlibrary, mut url: Url, deadline: Instant) -
             let status = response.status();
             let mut body = Vec::new();
             response
-                .take(65536)
+                .take(65537)
                 .read_to_end(&mut body)
                 .map_err(|_| unavailable("Z-Library download error response"))?;
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                && !verified
+                && let Some(challenge) = guest_challenge(&body)
+            {
+                let (proof, elapsed) = guest_proof(&challenge, deadline)?;
+                // Host-only, secure, operation-local guest cookies. Never persist or log them.
+                cookies.add_cookie_str(&format!("c_token={proof}; Path=/; Secure"), &url);
+                cookies.add_cookie_str(
+                    &format!("c_time={}; Path=/; Secure", elapsed.as_secs_f64()),
+                    &url,
+                );
+                verified = true;
+                continue;
+            }
             decode(status, &body)?;
             return Err(Error::new(
                 "zlibrary_guest_unavailable",
@@ -336,11 +436,6 @@ fn file_response(http: &Client, z: &Zlibrary, mut url: Url, deadline: Instant) -
         }
         return Ok(response);
     }
-    Err(Error::new(
-        "unsafe_download_url",
-        "Z-Library exceeded the limit of three download redirects",
-        6,
-    ))
 }
 pub(crate) fn validate_epub(path: &Path) -> Result<()> {
     if !(1..=MAX_EPUB_BYTES).contains(&fs::metadata(path)?.len()) {
@@ -431,7 +526,7 @@ pub fn download(c: &Config, reference: &str, dir: &Path) -> Result<()> {
     part.sync_all()?;
     fs::File::open(dir)?.sync_all()?;
     let result = (|| {
-        let http = client()?;
+        let (http, cookies) = client()?;
         let url = origin(&z.base_url)?
             .join(&format!("eapi/book/{id}/{hash}"))
             .map_err(|_| malformed())?;
@@ -456,6 +551,7 @@ pub fn download(c: &Config, reference: &str, dir: &Path) -> Result<()> {
             })?;
         let response = file_response(
             &http,
+            &cookies,
             z,
             download_url(z, link)?,
             Instant::now() + Duration::from_secs(60),

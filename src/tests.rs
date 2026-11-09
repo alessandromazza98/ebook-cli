@@ -712,3 +712,58 @@ fn guest_worker_reuses_completed_download_and_rejects_interrupted_attempts_witho
     assert_eq!(db.job(&j.id).unwrap().state, "ready");
     assert!(dir.join("prepared.epub").exists());
 }
+
+fn guest_check_page(challenge: &str) -> String {
+    format!(
+        r#"<title>Checking your browser ...</title><script>
+        /* The SHA-1 browser library exposes JS_SHA1_NO_NODE_JS. */
+        const guest_params=['{challenge}','c_token=','array'];
+        let n1=parseInt('0x'+c[0x0]);
+        if ((s[n1]===0xb0)&&(s[n1+0x1]===0xb)) {{
+            document.cookie='c_time='+elapsed;
+            window.location.reload();
+        }}
+    </script>"#
+    )
+}
+
+#[test]
+fn guest_check_parser_accepts_known_protocol_and_rejects_changed_or_ambiguous_scripts() {
+    use crate::zlibrary::guest_challenge;
+    let challenge = "0aaaaaaaaaaaaaaaaaaaaaaaaa008388";
+    let page = guest_check_page(challenge);
+    assert_eq!(guest_challenge(page.as_bytes()).as_deref(), Some(challenge));
+    for changed in [
+        page.replace("0xb0", "0xa0"),
+        page.replace("JS_SHA1_NO_NODE_JS", "unknown_digest"),
+        guest_check_page("not-a-challenge"),
+        guest_check_page(&"0".repeat(513)),
+        format!("{page}{page}"),
+        format!("{page}{}", "x".repeat(65536)),
+    ] {
+        assert!(guest_challenge(changed.as_bytes()).is_none());
+    }
+}
+
+#[test]
+fn guest_proof_matches_independent_sha1_vector_and_honors_deadline() {
+    use crate::zlibrary::guest_proof;
+    use std::time::{Duration, Instant};
+    // Generated independently with Python hashlib: nonce 0 fails and nonce 1 succeeds.
+    let challenge = "0aaaaaaaaaaaaaaaaaaaaaaaaa008388";
+    let (proof, _) = guest_proof(challenge, Instant::now() + Duration::from_secs(5)).unwrap();
+    assert_eq!(proof, format!("{challenge}1"));
+    assert_eq!(
+        guest_proof(challenge, Instant::now() - Duration::from_secs(1))
+            .unwrap_err()
+            .code,
+        "zlibrary_guest_blocked"
+    );
+    for input in [
+        "bad",
+        "zaaaaaaaaaaaaaaaaaaaaaaaaa008388",
+        "0aaaaaaaaaaaaaaaaaaaaaaa;cookie=x",
+    ] {
+        assert!(guest_proof(input, Instant::now() + Duration::from_secs(5)).is_err());
+    }
+}

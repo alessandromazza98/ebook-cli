@@ -137,7 +137,7 @@ Z-Library origin, and restart both API and worker:
 "zlibrary": {
   "enabled": true,
   "base_url": "https://z-library.ec",
-  "download_hosts": []
+  "download_hosts": ["dln1.ncdn.ec"]
 }
 ```
 
@@ -167,14 +167,22 @@ browser-check page is accepted as a book. Source EPUBs and prepared attachments
 are capped at 30 MiB, independently of the MAM torrent cap.
 
 Downloads use HTTPS and at most three manually validated redirects. The base
-host is trusted; additional exact file hosts must be explicitly verified and
+host is trusted; `dln1.ncdn.ec` is the file CDN verified from the provider's guest
+redirect. Additional exact file hosts must be explicitly verified and
 listed in `download_hosts`. The API never accepts a URL or download host from
 the caller. URLs, guest cookies and response bodies are excluded from telemetry.
 Searches share an overall budget below the API's 120-second deadline.
 
-`zlibrary_guest_blocked` reports a browser check; `zlibrary_guest_unavailable`
+The supported guest check is completed automatically using the site's SHA-1
+proof-of-work protocol. Only bounded challenge data is parsed; remote JavaScript
+is never executed. At most one challenge is completed per download, with a
+five-second computation budget and one million candidate proofs. Guest cookies
+are secure, host-only and discarded after the operation; they are not forwarded
+to the file CDN. These checks share the download's overall deadline.
+
+`zlibrary_guest_blocked` reports an unsupported or unsuccessful guest check; `zlibrary_guest_unavailable`
 reports an operation refused to guests; `zlibrary_quota_exceeded` reports the
-guest quota. No browser challenge is bypassed and no account login is attempted.
+guest quota. Unknown challenges fail explicitly and no account login is attempted.
 Direct-download failures are not automatically retried, since they may consume
 quota. A durable `.part` file records interrupted attempts. An explicit owner
 `retry` clears that partial attempt; complete source files survive restarts and

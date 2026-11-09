@@ -193,7 +193,7 @@ fn help_document(c: &Config, role: Role) -> Value {
         "limits": {"requests_per_minute":c.api.requests_per_minute, "new_jobs_per_rolling_24_hours":c.api.jobs_per_day, "max_torrent_bytes":c.max_torrent_bytes, "max_epub_bytes":crate::zlibrary::MAX_EPUB_BYTES,"max_request_bytes":8192},
         "errors": {
             "zlibrary_not_configured":"Z-Library guest access is disabled. Report this to the owner; do not request account credentials.",
-            "zlibrary_guest_blocked":"The guest download requires a browser check. No file was delivered; do not retry automatically or request an account.",
+            "zlibrary_guest_blocked":"The server could not complete the provider's guest check. Supported checks are handled automatically. No file was delivered; do not retry automatically or request an account.",
             "zlibrary_guest_unavailable":"The provider did not permit the guest operation or provide an EPUB. Report this without asking for login details.",
             "zlibrary_quota_exceeded":"Guest/IP quota is exhausted. Wait for the provider's reset; an owner can retry a failed job later.",
             "zlibrary_download_interrupted":"The download may have consumed a guest slot. An explicit owner retry is required; do not create another job to bypass this.",
