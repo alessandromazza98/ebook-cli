@@ -139,7 +139,15 @@ fn help_document(c: &Config, role: Role) -> Value {
     }
     json!({
         "api_version": env!("CARGO_PKG_VERSION"),
-        "purpose": "Find EPUB books, download through qBittorrent, prepare them and email them to the server-configured Kindle.",
+        "purpose": "Find EPUB books through MAM or guest-only Z-Library, download them, prepare them and email them to the server-configured Kindle.",
+        "sources": {
+            "default":"auto",
+            "allowed":["auto","mam","zlibrary"],
+            "auto":"Search MAM first. Fall back to Z-Library when no eligible result plausibly matches the title and optional author/language. A MAM error is reported, not treated as zero results. Ambiguous plausible MAM matches require clarification.",
+            "explicit":"Set source=zlibrary on search or request whenever the user explicitly asks for Z-Library, regardless of MAM results. source=mam disables fallback.",
+            "zlibrary":{"enabled":c.zlibrary.as_ref().is_some_and(|z|z.enabled),"mode":"guest_only","account_required":false,"instruction":"Guest access is subject to the provider's current IP quota and browser restrictions. Never ask for a Z-Library account/password or claim a file was downloaded from search alone."},
+            "results":"Release source identifies the provider. sources_searched lists successful searches. warnings exposes failed/unconfigured automatic fallback; it is not evidence that Z-Library has no matching book. seeders=0 is normal for Z-Library direct downloads."
+        },
         "delivery": {
             "configured": !c.smtp.host.is_empty() && !c.smtp.from.is_empty() && !c.smtp.kindle.is_empty(),
             "destination": "server_configured_kindle",
@@ -148,15 +156,17 @@ fn help_document(c: &Config, role: Role) -> Value {
         },
         "authentication": {"scheme":"Bearer", "credential_role":role.name(), "allowed_actions":actions},
         "operations": {
-            "search": "Read-only lookup. Returns releases and caches their IDs. It NEVER creates a job, downloads or sends a book.",
-            "request": "Submit a title with optional author/language and an idempotency_key. A clear match creates or reuses a job; ambiguity returns clarification_required without creating a job.",
+            "search": "Read-only lookup with query, optional author/language and source (auto, mam or zlibrary). Use the book title as query and pass the author separately when known. Returns releases and caches IDs. NEVER creates a job, downloads or sends a book.",
+            "request": "Submit title, optional author/language/source, and an idempotency_key. A clear match creates or reuses a job; ambiguity returns clarification_required. Completed searches with no suitable book return not_found. Neither creates a job. Search and automatic fallback follow the same source policy.",
             "select": "Submit an eligible release_id from search or clarification candidates, language if needed, and an idempotency_key. Creates or reuses a job. The worker automatically downloads, prepares and sends it; no separate download/send call is needed.",
             "jobs": "List existing jobs. Does not create or start anything.",
             "status": "Read an existing job using its job_id. Does not create or start anything."
         },
         "workflow": [
             "For a user's request to send a book, call request, or search followed by select for the chosen eligible release.",
+            "If the user explicitly names Z-Library, set source=zlibrary. Omit source or use auto for MAM-first fallback. Inspect warnings and report incomplete searches accurately.",
             "After clarification_required, ask only about the ambiguity described in reason/candidates, then select the user's choice.",
+            "After not_found, report that the successfully searched sources had no suitable match. Candidates are alternatives, not confirmed matches. A failed fallback instead returns clarification_required with reason=search_incomplete and warnings; do not claim the book is absent.",
             "Only report that a job exists after receiving ok=true and data.job.id. Inspect data.job.state: a replay can return a completed job without sending again.",
             "Poll status for the returned job_id every 15–30 seconds until a terminal state. Downloads and SMTP run in the background.",
             "Report SMTP acceptance accurately and ask the user to confirm actual Kindle arrival. The restricted client cannot force retries or mark delivery confirmed."
@@ -165,6 +175,8 @@ fn help_document(c: &Config, role: Role) -> Value {
         "examples": {
             "request": {"action":"request", "title":"Alice's Adventures in Wonderland", "author":"Lewis Carroll", "language":"en", "idempotency_key":"REPLACE_WITH_A_UNIQUE_KEY_FOR_THIS_SUBMISSION"},
             "search": {"action":"search", "query":"Alice's Adventures in Wonderland"},
+            "zlibrary_search": {"action":"search", "query":"REPLACE_WITH_REQUESTED_TITLE", "author":"REPLACE_WITH_REQUESTED_AUTHOR_OR_OMIT", "source":"zlibrary"},
+            "zlibrary_request": {"action":"request", "title":"REPLACE_WITH_REQUESTED_TITLE", "source":"zlibrary", "language":"en", "idempotency_key":"REPLACE_WITH_A_UNIQUE_KEY_FOR_THIS_SUBMISSION"},
             "select": {"action":"select", "release_id":"REPLACE_WITH_RELEASE_ID_FROM_SEARCH", "language":"en", "idempotency_key":"REPLACE_WITH_A_UNIQUE_KEY_FOR_THIS_SUBMISSION"},
             "status": {"action":"status", "job_id":"REPLACE_WITH_RETURNED_JOB_ID"},
             "jobs": {"action":"jobs"}
@@ -178,8 +190,14 @@ fn help_document(c: &Config, role: Role) -> Value {
             "failed":"Report job.error.code and job.error.message. Owner intervention is required for retry.",
             "existing_workflow":"The torrent belongs to the existing workflow. Report this; do not change its category."
         },
-        "limits": {"requests_per_minute":c.api.requests_per_minute, "new_jobs_per_rolling_24_hours":c.api.jobs_per_day, "max_torrent_bytes":c.max_torrent_bytes, "max_request_bytes":8192},
+        "limits": {"requests_per_minute":c.api.requests_per_minute, "new_jobs_per_rolling_24_hours":c.api.jobs_per_day, "max_torrent_bytes":c.max_torrent_bytes, "max_epub_bytes":crate::zlibrary::MAX_EPUB_BYTES,"max_request_bytes":8192},
         "errors": {
+            "zlibrary_not_configured":"Z-Library guest access is disabled. Report this to the owner; do not request account credentials.",
+            "zlibrary_guest_blocked":"The guest download requires a browser check. No file was delivered; do not retry automatically or request an account.",
+            "zlibrary_guest_unavailable":"The provider did not permit the guest operation or provide an EPUB. Report this without asking for login details.",
+            "zlibrary_quota_exceeded":"Guest/IP quota is exhausted. Wait for the provider's reset; an owner can retry a failed job later.",
+            "zlibrary_download_interrupted":"The download may have consumed a guest slot. An explicit owner retry is required; do not create another job to bypass this.",
+            "unsafe_download_url":"A download or redirect host was not trusted. The owner must verify any additional host before allowing it.",
             "reporting":"Report the exact HTTP status and error.code/message without credentials. If the client tool prevents a call, report that tool error; do not claim the server rejected a call it never received.",
             "rate_limited":"Wait for Retry-After seconds before retrying; preserve the submission key and body.",
             "busy":"Wait at least 15 seconds before retrying with the same key and body.",

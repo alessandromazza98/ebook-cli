@@ -1,6 +1,6 @@
 # Ebook CLI
 
-Rust CLI, SQLite worker and authenticated HTTP API for MAM → qBittorrent → repaired
+Rust CLI, SQLite worker and authenticated HTTP API for MAM torrents or guest-only Z-Library downloads → repaired
 EPUB → Kindle email. The default output is one JSON envelope on stdout; worker
 events go to stderr/journald. It uses no AI service.
 
@@ -89,20 +89,97 @@ Use stable caller-supplied keys when retrying operations. A torrent's raw v1 inf
 hash is persisted before addition, so lost add responses reconcile by hash.
 Prepared bytes also have a durable delivery deduplication record.
 
-Search returns stable `mam:<id>` IDs, title, author, language, format, bytes,
-seeders, restrictions and eligibility. Searches are bounded to 300 results and
-report truncation. MAM still enforces account restrictions (including slots and
+Search returns stable `mam:<id>` or `zlibrary:<id>:<hash>` IDs, source, title, author, language, format, bytes,
+seeders, restrictions and eligibility. Searches are bounded to 300 MAM results
+and 50 Z-Library results and report truncation. MAM still enforces account restrictions (including slots and
 ratio) when downloading metainfo. CLI requests do not manage freeleech wedges.
 Keep enough unsatisfied slots for the parallel Chaptarr workflow.
 
 Automatic selection ranks title token overlap, author, language, seeders and
 size. It automatically downloads exact title/author matches with a resolved
-language; otherwise it returns `clarification_required` with candidates. An
+language; otherwise it returns `clarification_required` or `not_found` with candidates. An
 explicit language wins. Without one, a small set of title stopwords can resolve
 language among matching metadata; otherwise all clear matches must agree on
 language. Short titles and unsupported languages may require clarification.
 This conservative selector avoids a language-detection service. An agent can
 resolve natural-language intent and supply an explicit language or release ID.
+
+### Guest-only Z-Library fallback
+
+`search` and `request` accept `--source auto|mam|zlibrary` (API field `source`).
+The default, `auto`, searches MAM first and falls back when it has no eligible
+EPUB plausibly matching the title and optional author/language. A related title,
+wrong supplied author, unavailable torrent or wrong requested language does not
+prevent fallback. Completed searches with no suitable result return `not_found`
+without creating a job; any candidates are alternatives rather than matches.
+Exact normalized titles, or a title followed by a subtitle
+after a colon, are plausible; a supplied author's words must appear in the
+metadata, or match when punctuation and spacing are removed (such as JRR versus
+J. R. R.). Plausible ambiguous MAM matches stay on MAM and require clarification.
+Automatic selection remains conservative and requires exact title/author matches.
+A MAM error is reported rather than interpreted as an empty search.
+
+Use `--source zlibrary` whenever Z-Library is explicitly requested; this skips
+MAM entirely. `--source mam` disables fallback. Search accepts optional `--author`
+and `--language`, just like request. Pass the title as `query` and the author
+separately rather than combining them into an unstructured search string.
+
+```sh
+bin/ebook search "BOOK TITLE" --author "AUTHOR" --source zlibrary
+bin/ebook request "BOOK TITLE" --author "AUTHOR" --language en --source zlibrary --idempotency-key UNIQUE_KEY
+```
+
+Z-Library is optional and disabled when `zlibrary` is absent or null. To enable
+guest access, add this section to the private config, using a currently verified
+Z-Library origin, and restart both API and worker:
+
+```json
+"zlibrary": {
+  "enabled": true,
+  "base_url": "https://z-library.ec",
+  "download_hosts": []
+}
+```
+
+No Z-Library account, password, imported session or Z-Library send-to-Kindle
+service is used. Account fields are deliberately not accepted. Guest cookies
+last only for an operation. The provider sets its current guest/IP quota; it
+can be shared with other users of the server's public IP. `check` verifies guest
+search metadata when enabled, without downloading or sending a book. A passing
+search check does not prove that downloads are available.
+
+This integration uses unofficial EAPI search/book metadata and the website's
+guest download links. There is no stable provider API contract; endpoint or
+website changes may require an integration update. Protocol references:
+[EAPI research](https://github.com/baroxyton/zlibrary-eapi-documentation) and
+[current client notes](https://github.com/heartleo/zlib/blob/main/docs/eapi.md).
+
+`sources_searched` lists successfully searched providers. Automatic fallback
+failures appear in `warnings`; a failed fallback does not prove the book is
+absent. Explicit Z-Library failures return errors directly. A request needing
+clarification after a failed fallback uses reason `search_incomplete`.
+
+Z-Library release IDs are `zlibrary:<id>:<hash>`, and `source` is `zlibrary`.
+Their `seeders` value is 0 because these are direct downloads. The worker fetches
+fresh book details, downloads the guest link directly, validates the EPUB and
+reuses the existing preparation and SMTP pipeline. Neither website HTML nor a
+browser-check page is accepted as a book. Source EPUBs and prepared attachments
+are capped at 30 MiB, independently of the MAM torrent cap.
+
+Downloads use HTTPS and at most three manually validated redirects. The base
+host is trusted; additional exact file hosts must be explicitly verified and
+listed in `download_hosts`. The API never accepts a URL or download host from
+the caller. URLs, guest cookies and response bodies are excluded from telemetry.
+Searches share an overall budget below the API's 120-second deadline.
+
+`zlibrary_guest_blocked` reports a browser check; `zlibrary_guest_unavailable`
+reports an operation refused to guests; `zlibrary_quota_exceeded` reports the
+guest quota. No browser challenge is bypassed and no account login is attempted.
+Direct-download failures are not automatically retried, since they may consume
+quota. A durable `.part` file records interrupted attempts. An explicit owner
+`retry` clears that partial attempt; complete source files survive restarts and
+are reused. Preparation and SMTP retain their existing recovery behavior.
+Set `enabled` to false and restart both services to disable guest access.
 
 States: `queued` → `downloading` → `preparing` → `ready` → `sending` →
 `smtp_accepted`. Only a user's device confirmation changes a job to `delivered`.
@@ -112,7 +189,7 @@ never automatically resent. Inspect Kindle/email before acknowledging a retry.
 Message IDs remain stable, but SMTP servers need not deduplicate them.
 
 Worker errors are stored on the job and emitted as structured events. Dependency
-failures have at most five consecutive retries at the worker's 15-second poll
+failures for the MAM workflow have at most five consecutive retries at the worker's 15-second poll
 interval; persistent failures become `failed`. Explicit retry reconciles the
 same metainfo and torrent hash. Successful SMTP jobs cannot be retried. One
 worker holds an OS file lock. Retry/confirmation use conditional SQLite updates

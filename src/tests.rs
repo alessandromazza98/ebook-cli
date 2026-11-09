@@ -148,6 +148,7 @@ fn worker_lock_prevents_parallel_sends() {
 fn release(id: &str, author: &str, lang: &str) -> Release {
     Release {
         id: id.into(),
+        source: "mam".into(),
         title: "Heretics of Dune".into(),
         author: author.into(),
         language: Some(lang.into()),
@@ -186,7 +187,7 @@ fn selection_language_author_and_ambiguity() {
     );
     assert_eq!(
         selection::choose(&r, "Heretics of Dune", Some("Wrong Author"), Some("en")).unwrap()["status"],
-        "clarification_required"
+        "not_found"
     );
 }
 #[test]
@@ -353,4 +354,361 @@ fn legacy_config_defaults_to_safe_api_limits() {
     assert_eq!(c.api.requests_per_minute, 30);
     assert_eq!(c.api.jobs_per_day, 10);
     assert_eq!(c.max_torrent_bytes, 100 * 1024 * 1024);
+}
+
+fn search_result(releases: &[Release]) -> serde_json::Value {
+    json!({"releases":releases,"reported_total":releases.len(),"truncated":false})
+}
+fn guest_config() -> crate::config::Zlibrary {
+    crate::config::Zlibrary {
+        enabled: true,
+        base_url: "https://z-library.ec".into(),
+        download_hosts: vec![],
+    }
+}
+#[test]
+fn source_policy_respects_explicit_selection_and_relevant_mam_results() {
+    use crate::core::{Source, search_sources};
+    let mam = release("mam:1", "Frank Herbert", "en");
+    let result = search_sources(
+        Source::Auto,
+        "Heretics of Dune",
+        Some("Frank Herbert"),
+        Some("en"),
+        || Ok(search_result(std::slice::from_ref(&mam))),
+        || panic!("Relevant MAM result must not trigger fallback"),
+    )
+    .unwrap();
+    assert_eq!(result["sources_searched"], json!(["mam"]));
+    let result = search_sources(
+        Source::Zlibrary,
+        "Heretics of Dune",
+        None,
+        None,
+        || panic!("Explicit Z-Library must skip MAM"),
+        || Ok(search_result(&[])),
+    )
+    .unwrap();
+    assert_eq!(result["sources_searched"], json!(["zlibrary"]));
+    search_sources(
+        Source::Mam,
+        "Missing book",
+        None,
+        None,
+        || Ok(search_result(&[])),
+        || panic!("Explicit MAM must not fall back"),
+    )
+    .unwrap();
+}
+#[test]
+fn automatic_fallback_handles_empty_unrelated_restricted_author_and_language_results() {
+    use crate::core::{Source, search_sources};
+    let mam = release("mam:1", "Frank Herbert", "en");
+    let mut restricted = mam.clone();
+    restricted.eligible = false;
+    for (rows, title, author, lang) in [
+        (vec![], "Dune", None, None),
+        (vec![mam.clone()], "The Hobbit", None, None),
+        (
+            vec![mam.clone()],
+            "Heretics of Dune",
+            Some("Different Author"),
+            None,
+        ),
+        (vec![mam.clone()], "Heretics of Dune", None, Some("fr")),
+        (vec![restricted], "Heretics of Dune", None, None),
+    ] {
+        let result = search_sources(
+            Source::Auto,
+            title,
+            author,
+            lang,
+            || Ok(search_result(&rows)),
+            || Ok(search_result(&[])),
+        )
+        .unwrap();
+        assert_eq!(result["sources_searched"], json!(["mam", "zlibrary"]));
+        assert_eq!(result["fallback_reason"], "no_suitable_mam_match");
+    }
+}
+
+#[test]
+fn no_suitable_book_is_reported_as_not_found_instead_of_sending_related_books() {
+    let r = release("mam:1", "Frank Herbert", "en");
+    assert_eq!(
+        selection::choose(&[r], "The Hobbit", Some("J. R. R. Tolkien"), Some("en")).unwrap()["status"],
+        "not_found"
+    );
+    assert_eq!(
+        selection::choose(&[], "The Hobbit", None, None).unwrap()["status"],
+        "not_found"
+    );
+    let mut styled = release("mam:2", "J. R. R. Tolkien", "en");
+    styled.title = "The Hobbit".into();
+    assert!(selection::relevant(
+        &styled,
+        "The Hobbit",
+        Some("JRR Tolkien"),
+        Some("en")
+    ));
+    assert_eq!(
+        selection::choose(&[styled], "The Hobbit", Some("JRR Tolkien"), Some("en")).unwrap()["status"],
+        "clarification_required"
+    );
+}
+#[test]
+fn ambiguous_mam_results_require_clarification_and_upstream_failures_are_visible() {
+    use crate::core::{Source, search_sources};
+    use crate::error::Error;
+    let rows = vec![
+        release("mam:1", "Author One", "en"),
+        release("mam:2", "Author Two", "en"),
+    ];
+    let result = search_sources(
+        Source::Auto,
+        "Heretics of Dune",
+        None,
+        None,
+        || Ok(search_result(&rows)),
+        || panic!("Plausible ambiguous results stay on MAM"),
+    )
+    .unwrap();
+    let returned: Vec<Release> = serde_json::from_value(result["releases"].clone()).unwrap();
+    assert_eq!(
+        selection::choose(&returned, "Heretics of Dune", None, None).unwrap()["reason"],
+        "ambiguous_author"
+    );
+    assert!(
+        search_sources(
+            Source::Auto,
+            "Missing",
+            None,
+            None,
+            || Err(Error::dependency("MAM search")),
+            || panic!("MAM errors are not zero results")
+        )
+        .is_err()
+    );
+    let result = search_sources(
+        Source::Auto,
+        "Missing",
+        None,
+        None,
+        || Ok(search_result(&[])),
+        || Err(Error::dependency("Z-Library search")),
+    )
+    .unwrap();
+    assert_eq!(result["warnings"][0]["source"], "zlibrary");
+    assert_eq!(
+        result["warnings"][0]["error"]["code"],
+        "dependency_unavailable"
+    );
+    assert!(
+        search_sources(
+            Source::Zlibrary,
+            "Missing",
+            None,
+            None,
+            || panic!(),
+            || Err(Error::dependency("Z-Library search"))
+        )
+        .is_err()
+    );
+}
+#[test]
+fn api_source_defaults_and_guest_configuration_reject_credentials() {
+    use crate::core::{Action, Source};
+    let action: Action = serde_json::from_value(json!({"action":"search","query":"Dune"})).unwrap();
+    assert!(matches!(
+        action,
+        Action::Search {
+            source: Source::Auto,
+            ..
+        }
+    ));
+    assert!(
+        serde_json::from_value::<Action>(
+            json!({"action":"search","query":"Dune","source":"unknown"})
+        )
+        .is_err()
+    );
+    let mut z = serde_json::to_value(guest_config()).unwrap();
+    z["user_key"] = json!("not-accepted");
+    assert!(serde_json::from_value::<crate::config::Zlibrary>(z).is_err());
+    let mut old = serde_json::to_value(release("mam:1", "Author", "en")).unwrap();
+    old.as_object_mut().unwrap().remove("source");
+    assert_eq!(
+        serde_json::from_value::<Release>(old).unwrap().source(),
+        "mam"
+    );
+}
+#[test]
+fn zlibrary_metadata_is_guest_eligible_without_seeders_and_validates_identifiers() {
+    let mut v = json!({"id":42,"hash":"aabbcc","title":"Title","author":"Author","language":"English","extension":"epub","filesize":1024});
+    let r = crate::zlibrary::parse_release(&v).unwrap();
+    assert!(r.eligible);
+    assert_eq!(r.seeders, 0);
+    assert_eq!(r.source, "zlibrary");
+    assert_eq!(r.id, "zlibrary:42:aabbcc");
+    assert_eq!(r.language.as_deref(), Some("en"));
+    v["extension"] = json!("pdf");
+    assert!(!crate::zlibrary::parse_release(&v).unwrap().eligible);
+    v["hash"] = json!("../secret");
+    assert!(crate::zlibrary::parse_release(&v).is_err());
+    v["hash"] = json!("aabbcc");
+    v["filesize"] = json!(-1);
+    assert!(crate::zlibrary::parse_release(&v).is_err());
+}
+#[test]
+fn zlibrary_response_errors_are_explicit_and_do_not_include_raw_payloads() {
+    use crate::zlibrary::decode;
+    use reqwest::StatusCode;
+    assert_eq!(
+        decode(
+            StatusCode::SERVICE_UNAVAILABLE,
+            b"<html><title>Checking your browser ...</title></html>"
+        )
+        .unwrap_err()
+        .code,
+        "zlibrary_guest_blocked"
+    );
+    assert_eq!(
+        decode(StatusCode::TOO_MANY_REQUESTS, b"private payload")
+            .unwrap_err()
+            .code,
+        "zlibrary_quota_exceeded"
+    );
+    assert_eq!(
+        decode(StatusCode::OK, b"<html>Daily limit reached</html>")
+            .unwrap_err()
+            .code,
+        "zlibrary_quota_exceeded"
+    );
+    let error = decode(
+        StatusCode::OK,
+        br#"{"success":0,"error":"Authorization failed: secret"}"#,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "zlibrary_guest_unavailable");
+    assert!(!error.message.contains("secret"));
+    assert_eq!(
+        decode(StatusCode::OK, b"non JSON").unwrap_err().code,
+        "invalid_upstream_response"
+    );
+    assert!(decode(StatusCode::OK, br#"{"success":1,"books":[]}"#).is_ok());
+    assert!(
+        decode(
+            StatusCode::OK,
+            br#"{"success":1,"books":[{"title":"Checking your browser"}]}"#
+        )
+        .is_ok()
+    );
+}
+#[test]
+fn zlibrary_download_hosts_and_redirects_cannot_escape_owner_trust() {
+    use crate::zlibrary::{download_url, origin};
+    let mut z = guest_config();
+    assert!(download_url(&z, "/dl/opaque").is_ok());
+    for input in [
+        "http://z-library.ec/dl/x",
+        "https://127.0.0.1/x",
+        "https://[::1]/x",
+        "https://evil.example/x",
+        "//evil.example/x",
+        "https://user:password@z-library.ec/x",
+        "https://z-library.ec:8443/x",
+        "https://z-library.ec/x#fragment",
+    ] {
+        assert!(download_url(&z, input).is_err(), "{input}");
+    }
+    for input in [
+        "https://127.0.0.1",
+        "https://localhost",
+        "https://host.local",
+        "https://example.org/path",
+        "https://example.org?x=1",
+    ] {
+        assert!(origin(input).is_err(), "{input}");
+    }
+    z.download_hosts.push("files.example.org".into());
+    assert!(download_url(&z, "https://files.example.org/file.epub?signature=opaque").is_ok());
+    assert!(download_url(&z, "https://other.files.example.org/file.epub").is_err());
+    assert!(z.validate().is_ok());
+}
+#[test]
+fn guest_download_commits_only_complete_valid_epubs() {
+    let t = tempfile::tempdir().unwrap();
+    let source = fs::read(fixture().join("test_minimal_valid.epub")).unwrap();
+    let target = t.path().join("source.epub");
+    let partial = t.path().join("source.epub.part");
+    for (bytes, expected) in [
+        (b"<html>Quota exhausted</html>".to_vec(), None),
+        (vec![], None),
+        (source.clone(), Some(source.len() as u64 + 1)),
+    ] {
+        let file = fs::File::create(&partial).unwrap();
+        assert!(
+            crate::zlibrary::save_file(bytes.as_slice(), file, &partial, &target, expected)
+                .is_err()
+        );
+        assert!(!target.exists());
+    }
+    let file = fs::File::create(&partial).unwrap();
+    crate::zlibrary::save_file(
+        source.as_slice(),
+        file,
+        &partial,
+        &target,
+        Some(source.len() as u64),
+    )
+    .unwrap();
+    assert_eq!(fs::read(&target).unwrap(), source);
+    assert!(!partial.exists());
+    let other = t.path().join("too-large.epub");
+    let file = fs::File::create(&partial).unwrap();
+    let huge = std::io::repeat(b'x').take(crate::zlibrary::MAX_EPUB_BYTES + 1);
+    assert_eq!(
+        crate::zlibrary::save_file(huge, file, &partial, &other, None)
+            .unwrap_err()
+            .code,
+        "download_too_large"
+    );
+    assert!(!other.exists());
+    assert_eq!(fs::read(&target).unwrap(), source);
+}
+#[test]
+fn guest_worker_reuses_completed_download_and_rejects_interrupted_attempts_without_network() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = config(t.path());
+    c.zlibrary = Some(guest_config());
+    let mut db = Db::open(&c).unwrap();
+    let j = db.submit("zlibrary:42:aabbcc", "en", "guest").unwrap();
+    let dir = c.processing_dir.join(&j.id);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("source.epub.part"), b"partial").unwrap();
+    worker::tick(&c, &db).unwrap();
+    assert_eq!(db.job(&j.id).unwrap().state, "failed");
+    assert_eq!(
+        db.job(&j.id).unwrap().error.unwrap()["code"],
+        "zlibrary_download_interrupted"
+    );
+    crate::core::execute(
+        &c,
+        crate::core::Action::Retry {
+            job_id: j.id.clone(),
+            acknowledge_possible_duplicate: false,
+        },
+    )
+    .unwrap();
+    assert!(!dir.join("source.epub.part").exists());
+    fs::copy(
+        fixture().join("test_minimal_valid.epub"),
+        dir.join("source.epub"),
+    )
+    .unwrap();
+    worker::tick(&c, &db).unwrap();
+    assert_eq!(db.job(&j.id).unwrap().state, "preparing");
+    worker::tick(&c, &db).unwrap();
+    assert_eq!(db.job(&j.id).unwrap().state, "ready");
+    assert!(dir.join("prepared.epub").exists());
 }

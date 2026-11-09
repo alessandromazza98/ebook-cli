@@ -13,6 +13,27 @@ fn norm(s: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+pub fn relevant(r: &Release, title: &str, author: Option<&str>, lang: Option<&str>) -> bool {
+    if !r.eligible || lang.is_some_and(|l| r.language.as_deref() != Some(l)) {
+        return false;
+    }
+    let wanted = norm(title);
+    let title_matches = norm(&r.title) == wanted
+        || r.title
+            .split_once(':')
+            .is_some_and(|(base, _)| norm(base) == wanted);
+    title_matches
+        && author.is_none_or(|a| {
+            let wanted = norm(a);
+            let actual = norm(&r.author);
+            !wanted.is_empty()
+                && (wanted.split_whitespace().collect::<String>()
+                    == actual.split_whitespace().collect::<String>()
+                    || wanted
+                        .split_whitespace()
+                        .all(|word| actual.split_whitespace().any(|w| w == word)))
+        })
+}
 fn title_language(
     title: &str,
     candidates: &std::collections::HashSet<Option<&String>>,
@@ -53,6 +74,9 @@ pub fn choose(
         return Err(Error::invalid("Title is required"));
     }
     let explicit = lang.map(language).transpose()?;
+    let has_relevant_match = releases
+        .iter()
+        .any(|r| relevant(r, title, author, explicit.as_deref()));
     let mut ranked: Vec<_> = releases
         .iter()
         .filter(|r| r.eligible)
@@ -106,6 +130,6 @@ pub fn choose(
         );
     }
     Ok(
-        json!({"status":"clarification_required","reason":if matches.is_empty(){"no_clear_title_author_language_match"}else if authors.len()>1{"ambiguous_author"}else{"language_or_author_required"},"candidates":ranked.into_iter().take(20).map(|(r,_,score)|json!({"release":r,"score":score})).collect::<Vec<_>>()}),
+        json!({"status":if has_relevant_match{"clarification_required"}else{"not_found"},"reason":if !has_relevant_match{"no_suitable_title_author_language_match"}else if matches.is_empty(){"no_clear_title_author_language_match"}else if authors.len()>1{"ambiguous_author"}else{"language_or_author_required"},"candidates":ranked.into_iter().take(20).map(|(r,_,score)|json!({"release":r,"score":score})).collect::<Vec<_>>()}),
     )
 }

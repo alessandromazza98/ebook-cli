@@ -100,6 +100,12 @@ fn message(c: &Config, j: &Job, path: &Path) -> Result<Message> {
         .map_err(|_| Error::invalid("Cannot construct email message"))
 }
 fn step(c: &Config, db: &Db, j: &Job) -> Result<()> {
+    if j.release_id.starts_with("zlibrary:") && matches!(j.state.as_str(), "queued" | "downloading")
+    {
+        db.state(&j.id, "downloading", None)?;
+        crate::zlibrary::download(c, &j.release_id, &c.processing_dir.join(&j.id))?;
+        return db.state(&j.id, "preparing", None);
+    }
     match j.state.as_str() {
         "queued" => {
             let qb = Qb::connect(c)?;

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Ebook API",
-    "version": "0.2.1",
-    "description": "FIRST call GET /v1/help for configuration status, workflow instructions and examples. The Kindle recipient is already configured on the server; no recipient parameter is required. Search only finds books. To start a download and automatic Kindle email, call action=request or action=select and require data.job.id before claiming a job was created. Bearer-authenticated ebook operations through an HTTPS reverse proxy or private tunnel. Keep one idempotency key per submission and reuse it after timeouts. SMTP acceptance is not confirmed Kindle delivery. Defaults: 30 requests/minute per credential role, 10 new API jobs per rolling 24 hours, 100 MiB per torrent. Poll status every 15\u201330 seconds. The owner credential alone permits retry and confirm_delivery."
+    "version": "0.3.0",
+    "description": "FIRST call GET /v1/help for configuration status, workflow instructions and examples. The Kindle recipient is already configured on the server; no recipient parameter is required. Search only finds books. To start a download and automatic Kindle email, call action=request or action=select and require data.job.id before claiming a job was created. Bearer-authenticated ebook operations through an HTTPS reverse proxy or private tunnel. Keep one idempotency key per submission and reuse it after timeouts. SMTP acceptance is not confirmed Kindle delivery. Defaults: 30 requests/minute per credential role, 10 new API jobs per rolling 24 hours, 100 MiB per torrent. Poll status every 15\u201330 seconds. The owner credential alone permits retry and confirm_delivery. Sources: auto (default) searches MAM first, then guest-only Z-Library if no suitable title/author/language EPUB match exists. Set source=zlibrary to search/request Z-Library directly regardless of MAM results, or source=mam to disable fallback. Z-Library uses no account. Inspect search warnings: failed fallback does not mean a book is absent. Guest browser blocks and IP quotas are reported explicitly. Direct EPUB downloads are capped at 30 MiB."
   },
   "servers": [
     {
@@ -297,9 +297,35 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 300
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "mam",
+              "zlibrary"
+            ],
+            "default": "auto",
+            "description": "auto: MAM first, then Z-Library when no suitable match exists. zlibrary: explicitly search only Z-Library regardless of MAM results. mam: MAM only. MAM errors do not trigger automatic fallback."
+          },
+          "author": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional author constraint; pass the book title as query.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional language constraint; pass the book title as query."
           }
         },
-        "description": "Find and cache releases only. This action NEVER downloads, sends or creates a job. To fulfill a send request, follow with select or use request."
+        "description": "Find and cache releases only. This action NEVER downloads, sends or creates a job. To fulfill a send request, follow with select or use request. Supports optional source, author and language. Search never consumes a file download slot or starts a job. warnings lists failures of automatic fallback."
       },
       "select": {
         "type": "object",
@@ -316,7 +342,7 @@
           },
           "release_id": {
             "type": "string",
-            "pattern": "^mam:[0-9]+$"
+            "pattern": "^(mam:[0-9]+|zlibrary:[0-9]{1,20}:[0-9a-fA-F]{1,64})$"
           },
           "language": {
             "type": [
@@ -348,13 +374,16 @@
           },
           "title": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 300
           },
           "author": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "minLength": 1,
+            "maxLength": 300
           },
           "language": {
             "type": [
@@ -367,9 +396,19 @@
             "minLength": 1,
             "maxLength": 128,
             "description": "Unique key for this intended submission. Reuse the same key and body after timeouts or lost responses."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "mam",
+              "zlibrary"
+            ],
+            "default": "auto",
+            "description": "auto: MAM first, then Z-Library when no suitable match exists. zlibrary: explicitly search only Z-Library regardless of MAM results. mam: MAM only. MAM errors do not trigger automatic fallback."
           }
         },
-        "description": "Start the book workflow from a title: automatically select a clear match and create/reuse a job, or return clarification_required. The worker handles download, EPUB preparation and email to the configured Kindle. No recipient parameter is needed."
+        "description": "Start the book workflow from a title: automatically select a clear match and create/reuse a job, or return clarification_required. The worker handles download, EPUB preparation and email to the configured Kindle. No recipient parameter is needed. Supports optional source (auto, mam, zlibrary). source=zlibrary bypasses MAM. Search warnings are included in clarification/selection metadata. A completed search with no suitable match returns status=not_found without creating a job."
       },
       "jobs": {
         "type": "object",
@@ -515,6 +554,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/Clarification"
+                  },
+                  {
+                    "$ref": "#/components/schemas/NotFound"
                   }
                 ]
               }
@@ -548,12 +590,13 @@
           "size_bytes",
           "seeders",
           "restrictions",
-          "eligible"
+          "eligible",
+          "source"
         ],
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^mam:[0-9]+$"
+            "pattern": "^(mam:[0-9]+|zlibrary:[0-9]{1,20}:[0-9a-fA-F]{1,64})$"
           },
           "title": {
             "type": "string"
@@ -576,7 +619,8 @@
           },
           "seeders": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Torrent seeders for MAM. Always 0 for direct Z-Library downloads; this does not make them ineligible."
           },
           "restrictions": {
             "type": "array",
@@ -586,6 +630,13 @@
           },
           "eligible": {
             "type": "boolean"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "mam",
+              "zlibrary"
+            ]
           }
         }
       },
@@ -632,7 +683,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "MAM torrent info hash; null for direct Z-Library jobs."
           },
           "prepared_path": {
             "type": [
@@ -674,10 +726,33 @@
             }
           },
           "reported_total": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Sum of the providers' reported totals; may include unrelated or ineligible books."
           },
           "truncated": {
             "type": "boolean"
+          },
+          "sources_searched": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "mam",
+                "zlibrary"
+              ]
+            },
+            "description": "Providers successfully searched."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchWarning"
+            },
+            "description": "Automatic fallback could not complete; do not report this as no Z-Library match."
+          },
+          "fallback_reason": {
+            "type": "string",
+            "const": "no_suitable_mam_match"
           }
         }
       },
@@ -721,7 +796,8 @@
             "const": "clarification_required"
           },
           "reason": {
-            "type": "string"
+            "type": "string",
+            "description": "search_incomplete means an attempted fallback failed; inspect warnings. Other reasons describe matching ambiguity."
           },
           "candidates": {
             "type": "array",
@@ -740,6 +816,24 @@
                 }
               }
             }
+          },
+          "sources_searched": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "mam",
+                "zlibrary"
+              ]
+            },
+            "description": "Providers successfully searched."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchWarning"
+            },
+            "description": "Automatic fallback could not complete; do not report this as no Z-Library match."
           }
         }
       },
@@ -757,7 +851,8 @@
           "idempotency",
           "states",
           "limits",
-          "errors"
+          "errors",
+          "sources"
         ],
         "properties": {
           "api_version": {
@@ -903,6 +998,10 @@
               "max_request_bytes": {
                 "type": "integer",
                 "minimum": 1
+              },
+              "max_epub_bytes": {
+                "type": "integer",
+                "const": 31457280
               }
             }
           },
@@ -911,8 +1010,80 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "sources": {
+            "type": "object",
+            "description": "Source selection policy and guest-only Z-Library configuration/availability. Contains no credentials."
           }
         }
+      },
+      "SearchWarning": {
+        "type": "object",
+        "required": [
+          "source",
+          "error"
+        ],
+        "properties": {
+          "source": {
+            "const": "zlibrary"
+          },
+          "error": {
+            "$ref": "#/components/schemas/Error"
+          }
+        }
+      },
+      "NotFound": {
+        "type": "object",
+        "required": [
+          "status",
+          "reason",
+          "candidates"
+        ],
+        "properties": {
+          "status": {
+            "const": "not_found"
+          },
+          "reason": {
+            "const": "no_suitable_title_author_language_match"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "release",
+                "score"
+              ],
+              "properties": {
+                "release": {
+                  "$ref": "#/components/schemas/Release"
+                },
+                "score": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "sources_searched": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "mam",
+                "zlibrary"
+              ]
+            },
+            "description": "Providers successfully searched."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchWarning"
+            },
+            "description": "Automatic fallback could not complete; do not report this as no Z-Library match."
+          }
+        },
+        "description": "Successfully searched sources had no suitable title/author/language EPUB match. No job was created. Candidates are alternatives, not confirmed matches. Failed fallback instead returns clarification_required with reason=search_incomplete and warnings."
       }
     }
   }

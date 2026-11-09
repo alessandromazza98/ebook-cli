@@ -8,6 +8,7 @@ mod integrations;
 mod selection;
 mod torrent;
 mod worker;
+mod zlibrary;
 
 use clap::{Parser, Subcommand};
 use error::{Error, Result};
@@ -37,13 +38,19 @@ struct Cli {
 enum Command {
     /// Write a private configuration template without overwriting existing files.
     Setup,
-    /// Check MAM, qBittorrent and SMTP. Sends no email.
+    /// Check MAM, qBittorrent, SMTP and configured Z-Library guest search. Sends no email.
     Check {
         #[arg(long)]
         create_category: bool,
     },
     Search {
         query: String,
+        #[arg(long, value_enum, default_value_t = core::Source::Auto)]
+        source: core::Source,
+        #[arg(long)]
+        author: Option<String>,
+        #[arg(long)]
+        language: Option<String>,
     },
     Select {
         release_id: String,
@@ -54,6 +61,8 @@ enum Command {
     },
     Request {
         title: String,
+        #[arg(long, value_enum, default_value_t = core::Source::Auto)]
+        source: core::Source,
         #[arg(long)]
         author: Option<String>,
         #[arg(long)]
@@ -106,8 +115,16 @@ fn run(cli: &Cli) -> Result<Value> {
     }
     let c = config::Config::load(&cli.config)?;
     let action = match &cli.command {
-        Command::Search { query } => core::Action::Search {
+        Command::Search {
+            query,
+            source,
+            author,
+            language,
+        } => core::Action::Search {
             query: query.clone(),
+            source: *source,
+            author: author.clone(),
+            language: language.clone(),
         },
         Command::Select {
             release_id,
@@ -122,11 +139,13 @@ fn run(cli: &Cli) -> Result<Value> {
         },
         Command::Request {
             title,
+            source,
             author,
             language,
             idempotency_key,
         } => core::Action::Request {
             title: title.clone(),
+            source: *source,
             author: author.clone(),
             language: language.clone(),
             idempotency_key: idempotency_key
@@ -166,7 +185,11 @@ fn run(cli: &Cli) -> Result<Value> {
                     }
                 });
             let mut failed = false;
-            for (name, result) in [("qbittorrent", qb), ("mam", mam), ("smtp", mail)] {
+            let mut dependencies = vec![("qbittorrent", qb), ("mam", mam), ("smtp", mail)];
+            if c.zlibrary.as_ref().is_some_and(|z| z.enabled) {
+                dependencies.push(("zlibrary", zlibrary::check(&c)));
+            }
+            for (name, result) in dependencies {
                 match result {
                     Ok(()) => checks.push(json!({"dependency":name,"ok":true})),
                     Err(e) => {
@@ -230,7 +253,8 @@ fn main() {
     };
     match run(&cli) {
         Ok(data) => {
-            let clarify = data["status"] == "clarification_required";
+            let clarify =
+                data["status"] == "clarification_required" || data["status"] == "not_found";
             let v = json!({"ok":true,"data":data});
             if cli.human {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());

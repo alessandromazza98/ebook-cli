@@ -77,6 +77,8 @@ def main(binary):
             assert p.returncode == code, (args,p.returncode,p.stdout,p.stderr)
             return json.loads(p.stdout)
         cli('jobs')
+        assert cli('search','Dune','--source','zlibrary',code=5)['error']['code']=='zlibrary_not_configured'
+        assert cli('request','Dune','--source','zlibrary','--idempotency-key','guest-disabled',code=5)['error']['code']=='zlibrary_not_configured'
         (root/'ebook-cli').mkdir()
         source = (ROOT/'tests/fixtures/cwa/test_minimal_valid.epub').read_bytes()
         (root/'ebook-cli/book.epub').write_bytes(source)
@@ -169,6 +171,13 @@ def main(binary):
             assert help_data['authentication']['allowed_actions']==['search','request','select','jobs','status']
             assert help_data['limits']['requests_per_minute']==12
             assert help_data['limits']['new_jobs_per_rolling_24_hours']==1
+            assert help_data['sources']['default']=='auto'
+            assert help_data['sources']['zlibrary']['enabled'] is False
+            assert help_data['sources']['zlibrary']['mode']=='guest_only'
+            assert help_data['sources']['zlibrary']['account_required'] is False
+            # Explicit fallback skips MAM and fails locally when unconfigured.
+            assert request({'action':'search','query':'Dune','source':'zlibrary'},config['api_token'],409)['error']['code']=='zlibrary_not_configured'
+            assert request({'action':'search','query':'Dune','source':'unknown'},config['api_token'],400)['error']['code']=='invalid_input'
             assert conn.execute('SELECT count(*) FROM jobs').fetchone()[0]==3
             assert conn.execute('SELECT count(*) FROM api_submissions').fetchone()[0]==0
             for secret in [config['api_token'],client,config['smtp']['kindle'],config['mam']['session']]:
@@ -205,8 +214,12 @@ def main(binary):
         assert spec['paths']['/v1/help']['get']['operationId']=='ebookHelp'
         assert len(spec['components']['schemas']['Operation']['oneOf'])==5
         assert 'retry' not in spec['components']['schemas']
+        schemas=spec['components']['schemas']
+        assert schemas['search']['properties']['source']['enum']==['auto','mam','zlibrary']
+        assert 'zlibrary:' in schemas['select']['properties']['release_id']['pattern']
+        assert schemas['Release']['properties']['source']['enum']==['mam','zlibrary']
         assert not (root/'escape').exists()
-        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','qbittorrent_seeding_time_inherits_global','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi','authenticated_help','help_excludes_secrets','help_creates_no_jobs']}))
+        print(json.dumps({'ok':True,'checks':['lost_add_response_reconciled','qbittorrent_seeding_time_inherits_global','duplicate_submission_reused','source_unchanged','restart_send_uncertain','uncertain_retry_guard','existing_workflow_preserved','api_auth','api_schema','loopback_only','auth_before_json','client_scope','api_quota','api_rate_limit','download_size_limit','metainfo_size_before_add','public_openapi','authenticated_help','help_excludes_secrets','help_creates_no_jobs','guest_source_selection','guest_help_contract','zlibrary_release_ids']}))
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description=__doc__)

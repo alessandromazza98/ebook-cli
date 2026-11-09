@@ -12,6 +12,8 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub processing_dir: PathBuf,
     pub mam: Mam,
+    #[serde(default)]
+    pub zlibrary: Option<Zlibrary>,
     pub qbittorrent: Qbit,
     pub smtp: Smtp,
     pub api_token: String,
@@ -48,6 +50,35 @@ pub struct Mam {
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct Zlibrary {
+    #[serde(default)]
+    pub enabled: bool,
+    pub base_url: String,
+    /// Additional exact HTTPS hosts trusted by the owner for file downloads.
+    #[serde(default)]
+    pub download_hosts: Vec<String>,
+}
+impl Zlibrary {
+    pub fn validate(&self) -> Result<()> {
+        crate::zlibrary::origin(&self.base_url)?;
+        if self.download_hosts.len() > 10 {
+            return Err(Error::invalid(
+                "At most 10 Z-Library download hosts may be trusted",
+            ));
+        }
+        for host in &self.download_hosts {
+            let url = crate::zlibrary::origin(&format!("https://{host}"))?;
+            if url.host_str() != Some(host.as_str()) {
+                return Err(Error::invalid(
+                    "Z-Library download_hosts must contain exact lowercase DNS hostnames",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Qbit {
     pub url: String,
     pub username: String,
@@ -77,6 +108,7 @@ impl Config {
                 session: String::new(),
                 vip: false,
             },
+            zlibrary: None,
             qbittorrent: Qbit {
                 url: "http://127.0.0.1:8080".into(),
                 username: String::new(),
@@ -111,6 +143,9 @@ impl Config {
         Ok(c)
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(z) = &self.zlibrary {
+            z.validate()?;
+        }
         if self.api.client_token.as_ref().is_some_and(|token| {
             token.len() < 32
                 || token == &self.api_token

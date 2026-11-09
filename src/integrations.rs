@@ -10,6 +10,8 @@ use std::{io::Read, time::Duration};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Release {
     pub id: String,
+    #[serde(default = "mam_source")]
+    pub source: String,
     pub title: String,
     pub author: String,
     pub language: Option<String>,
@@ -18,6 +20,18 @@ pub struct Release {
     pub seeders: u64,
     pub restrictions: Vec<String>,
     pub eligible: bool,
+}
+fn mam_source() -> String {
+    "mam".into()
+}
+impl Release {
+    pub fn source(&self) -> &'static str {
+        if self.id.starts_with("zlibrary:") {
+            "zlibrary"
+        } else {
+            "mam"
+        }
+    }
 }
 pub fn client() -> Result<Client> {
     Client::builder()
@@ -193,6 +207,7 @@ pub fn parse_release(v: &Value, vip: bool) -> Result<Release> {
     };
     Ok(Release {
         id: format!("mam:{id}"),
+        source: "mam".into(),
         title,
         author,
         language,
@@ -207,6 +222,13 @@ fn cookie(c: &Config) -> String {
     format!("mam_id={}; mam_ssl=1", c.mam.session)
 }
 pub fn search(c: &Config, query: &str) -> Result<Value> {
+    search_until(
+        c,
+        query,
+        std::time::Instant::now() + Duration::from_secs(80),
+    )
+}
+pub fn search_until(c: &Config, query: &str, deadline: std::time::Instant) -> Result<Value> {
     if query.trim().is_empty() || query.len() > 300 {
         return Err(Error::invalid("Search query must contain 1–300 bytes"));
     }
@@ -222,6 +244,7 @@ pub fn search(c: &Config, query: &str) -> Result<Value> {
             ))
             .header("Cookie", cookie(c))
             .json(&body)
+            .timeout(crate::core::remaining(deadline, Duration::from_secs(30))?)
             .send()
             .map_err(|_| Error::dependency("MAM search"))?;
         let data: Value = serde_json::from_slice(&bytes(r, 4 * 1024 * 1024, "MAM search")?)
