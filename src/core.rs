@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, language},
-    db::Db,
+    db::{Db, Job},
     error::{Error, Result},
     integrations::{self, Release},
     selection,
@@ -198,7 +198,45 @@ fn submit(
         Some(limit) => db.submit_limited(id, &l, key, Some(limit))?,
         None => db.submit(id, &l, key)?,
     };
+    let job = resume_cdn_download(c, db, job)?;
     Ok(json!({"job":job}))
+}
+
+pub(crate) fn resume_cdn_download(c: &Config, db: &Db, job: Job) -> Result<Job> {
+    let blocked = |j: &Job| {
+        j.state == "failed" && j.release_id.starts_with("zlibrary:")
+        && j.prepared_path.is_none() && j.error.as_ref().is_some_and(|e| {
+            e["code"] == "unsafe_download_url" && e["message"].as_str()
+                .and_then(|m| m.strip_prefix("Z-Library download host "))
+                .and_then(|m| m.strip_suffix(" is not trusted; the owner must verify any additional download host"))
+                .is_some_and(crate::zlibrary::approved_cdn)
+        })
+    };
+    if !blocked(&job) {
+        return Ok(job);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(&db.0, rusqlite::TransactionBehavior::Immediate)?;
+    let current = db.job(&job.id)?;
+    let attempted: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM deliveries WHERE job_id=?1)",
+        [&job.id],
+        |r| r.get(0),
+    )?;
+    // Older releases rejected these CDN variants before any file bytes or email attempt.
+    // Only an explicit selection/request can resume that specific failure after this policy upgrade.
+    let job = if blocked(&current) && !attempted {
+        crate::zlibrary::reset_partial(c, &current.id)?;
+        let resumed = db.retry(&current.id, false)?;
+        eprintln!(
+            "{}",
+            json!({"event":"download_resumed_after_cdn_policy_update","job_id":current.id,"source":"zlibrary"})
+        );
+        resumed
+    } else {
+        current
+    };
+    tx.commit()?;
+    Ok(job)
 }
 pub fn execute(c: &Config, action: Action) -> Result<Value> {
     execute_limited(c, action, None)

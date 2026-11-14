@@ -691,6 +691,179 @@ fn zlibrary_download_hosts_and_redirects_cannot_escape_owner_trust() {
     assert!(download_url(&z, "https://other.files.example.org/file.epub").is_err());
     assert!(z.validate().is_ok());
 }
+
+#[test]
+fn verified_cdn_family_allows_real_routes_and_rejects_lookalikes() {
+    use crate::zlibrary::download_url;
+    let z = guest_config();
+    for host in [
+        "cdl.ncdn.ec",
+        "dln1.ncdn.ec",
+        "dln2.ncdn.ec",
+        "ncdn.ec",
+        "edge.cdl.ncdn.ec",
+    ] {
+        assert!(download_url(&z, &format!("https://{host}/file.epub")).is_ok());
+    }
+    for url in [
+        "https://evilncdn.ec/file",
+        "https://ncdn.ec.attacker.example/file",
+        "https://cdl.ncdn.ec.attacker.example/file",
+        "http://cdl.ncdn.ec/file",
+        "https://user:secret@cdl.ncdn.ec/file",
+        "https://cdl.ncdn.ec:8443/file",
+    ] {
+        assert!(download_url(&z, url).is_err(), "{url}");
+    }
+}
+
+#[test]
+fn public_dns_filter_rejects_internal_mixed_and_transition_addresses() {
+    use crate::zlibrary::public_addresses;
+    use std::net::{IpAddr, SocketAddr};
+    let address = |s: &str| SocketAddr::new(s.parse::<IpAddr>().unwrap(), 0);
+    let public = vec![
+        address("1.1.1.1"),
+        address("104.21.1.2"),
+        address("2606:4700:4700::1111"),
+        address("2001:4860:4860::8888"),
+    ];
+    assert_eq!(public_addresses(public.clone()).unwrap(), public);
+    for ip in [
+        "0.0.0.0",
+        "10.0.0.1",
+        "127.0.0.1",
+        "169.254.169.254",
+        "172.16.0.1",
+        "192.168.1.1",
+        "100.64.0.1",
+        "198.18.0.1",
+        "192.0.2.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "255.255.255.255",
+        "::",
+        "::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+        "::ffff:127.0.0.1",
+        "64:ff9b::7f00:1",
+        "2001:db8::1",
+        "2001::1",
+        "2002:7f00:1::1",
+        "3fff::1",
+    ] {
+        assert!(public_addresses(vec![address(ip)]).is_err(), "{ip}");
+        assert!(
+            public_addresses(vec![address("1.1.1.1"), address(ip)]).is_err(),
+            "mixed {ip}"
+        );
+    }
+    assert!(public_addresses(vec![]).is_err());
+    assert!(public_addresses(vec![address("1.1.1.1"); 33]).is_err());
+}
+
+fn blocked_cdn_error(host: &str) -> crate::error::Error {
+    crate::error::Error::new(
+        "unsafe_download_url",
+        format!(
+            "Z-Library download host {host} is not trusted; the owner must verify any additional download host"
+        ),
+        6,
+    )
+}
+
+#[test]
+fn explicit_selection_resumes_old_cdn_failure_once_and_preserves_job_identity() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = config(t.path());
+    c.zlibrary = Some(guest_config());
+    let mut db = Db::open(&c).unwrap();
+    let mut r = release("zlibrary:42:aabbcc", "Author", "it");
+    r.source = "zlibrary".into();
+    db.cache(&r).unwrap();
+    let job = db.submit(&r.id, "it", "initial").unwrap();
+    db.state(&job.id, "failed", Some(&blocked_cdn_error("cdl.ncdn.ec")))
+        .unwrap();
+    let dir = c.processing_dir.join(&job.id);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("source.epub.part"), b"").unwrap();
+    let selected = crate::core::execute(
+        &c,
+        crate::core::Action::Select {
+            release_id: r.id.clone(),
+            language: Some("it".into()),
+            idempotency_key: "retry-through-instinct".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(selected["job"]["id"], job.id);
+    assert_eq!(selected["job"]["state"], "queued");
+    assert!(!dir.join("source.epub.part").exists());
+    fs::write(dir.join("source.epub.part"), b"active download").unwrap();
+    let again = crate::core::resume_cdn_download(&c, &db, db.job(&job.id).unwrap()).unwrap();
+    assert_eq!(again.state, "queued");
+    assert!(dir.join("source.epub.part").exists());
+    assert_eq!(db.jobs().unwrap().len(), 1);
+}
+
+#[test]
+fn cdn_recovery_never_restarts_sent_uncertain_prepared_or_unrelated_failures() {
+    let t = tempfile::tempdir().unwrap();
+    let c = config(t.path());
+    let mut db = Db::open(&c).unwrap();
+    for (index, state, host, prepared, attempted) in [
+        (1, "smtp_accepted", "cdl.ncdn.ec", false, false),
+        (2, "send_uncertain", "cdl.ncdn.ec", false, false),
+        (3, "failed", "cdl.ncdn.ec", true, false),
+        (4, "failed", "cdl.ncdn.ec", false, true),
+        (5, "failed", "unknown.example", false, false),
+    ] {
+        let j = db
+            .submit(
+                &format!("zlibrary:{index}:aabbcc"),
+                "en",
+                &format!("key-{index}"),
+            )
+            .unwrap();
+        db.state(&j.id, state, Some(&blocked_cdn_error(host)))
+            .unwrap();
+        if prepared {
+            db.0.execute(
+                "UPDATE jobs SET prepared_path='prepared.epub' WHERE id=?1",
+                [&j.id],
+            )
+            .unwrap();
+        }
+        if attempted {
+            db.0.execute(
+                "INSERT INTO deliveries(digest,job_id) VALUES(?1,?2)",
+                rusqlite::params![format!("digest-{index}"), j.id],
+            )
+            .unwrap();
+        }
+        let after = crate::core::resume_cdn_download(&c, &db, db.job(&j.id).unwrap()).unwrap();
+        assert_eq!(after.state, state);
+    }
+    let j = db.submit("zlibrary:6:aabbcc", "en", "quota").unwrap();
+    db.state(
+        &j.id,
+        "failed",
+        Some(&crate::error::Error::new(
+            "zlibrary_quota_exceeded",
+            "quota",
+            4,
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::core::resume_cdn_download(&c, &db, db.job(&j.id).unwrap())
+            .unwrap()
+            .state,
+        "failed"
+    );
+}
 #[test]
 fn guest_download_commits_only_complete_valid_epubs() {
     let t = tempfile::tempdir().unwrap();

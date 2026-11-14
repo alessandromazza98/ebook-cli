@@ -15,12 +15,78 @@ use sha1::{Digest, Sha1};
 use std::{
     fs,
     io::{Read, Write},
+    net::{IpAddr, SocketAddr},
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 pub const MAX_EPUB_BYTES: u64 = 30 * 1024 * 1024;
+
+struct PublicDns;
+impl reqwest::dns::Resolve for PublicDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addresses = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::net::lookup_host((name.as_str(), 0)),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "Z-Library DNS timed out")
+            })??;
+            let addresses = match public_addresses(addresses.take(33).collect()) {
+                Ok(addresses) => addresses,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        json!({"event":"provider_dns_rejected","source":"zlibrary","host":name.as_str()})
+                    );
+                    return Err(error.into());
+                }
+            };
+            // The connector uses these checked addresses directly, retaining the original TLS hostname.
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+pub(crate) fn public_addresses(addresses: Vec<SocketAddr>) -> std::io::Result<Vec<SocketAddr>> {
+    let global = |ip: IpAddr| match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !ip.is_private()
+                && !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_documentation()
+                && !ip.is_multicast()
+                && !ip.is_broadcast()
+                && a != 0
+                && a < 240
+                && !(a == 100 && (64..=127).contains(&b))
+                && !(a == 192 && b == 0 && c == 0)
+                && !(a == 192 && b == 88 && c == 99)
+                && !(a == 198 && (b == 18 || b == 19))
+        }
+        IpAddr::V6(ip) => {
+            let s = ip.segments();
+            // Public unicast only; exclude transition, protocol and documentation networks.
+            s[0] & 0xe000 == 0x2000
+                && s[0] != 0x2002
+                && !(s[0] == 0x2001 && (s[1] < 0x0200 || s[1] == 0x0db8))
+                && !(s[0] == 0x3fff && s[1] < 0x1000)
+        }
+    };
+    if addresses.is_empty() || addresses.len() > 32 || addresses.iter().any(|a| !global(a.ip())) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Z-Library DNS must resolve only to public unicast addresses",
+        ));
+    }
+    Ok(addresses)
+}
+pub(crate) fn approved_cdn(host: &str) -> bool {
+    host == "ncdn.ec" || host.ends_with(".ncdn.ec")
+}
 
 pub fn origin(input: &str) -> Result<Url> {
     let url = Url::parse(input).map_err(|_| Error::invalid("Invalid Z-Library HTTPS origin"))?;
@@ -65,6 +131,8 @@ fn client() -> Result<(Client, Arc<Jar>)> {
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicDns))
         .cookie_provider(cookies.clone())
         .user_agent(concat!("ebook-cli/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -290,11 +358,19 @@ pub(crate) fn download_url(z: &Zlibrary, input: &str) -> Result<Url> {
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || !url.host_str().is_some_and(|host| {
-            public_hostname(host)
-                && (Some(host) == base.host_str() || z.download_hosts.iter().any(|h| h == host))
-        })
+        || !url.host_str().is_some_and(public_hostname)
     {
+        return Err(Error::new(
+            "unsafe_download_url",
+            "Z-Library download URL must use HTTPS and a public DNS hostname without credentials, nondefault ports or fragments",
+            6,
+        ));
+    }
+    if !url.host_str().is_some_and(|host| {
+        Some(host) == base.host_str()
+            || approved_cdn(host)
+            || z.download_hosts.iter().any(|h| h == host)
+    }) {
         return Err(Error::new(
             "unsafe_download_url",
             format!(

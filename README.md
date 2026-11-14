@@ -140,7 +140,7 @@ Z-Library origin, and restart both API and worker:
 "zlibrary": {
   "enabled": true,
   "base_url": "https://z-library.ec",
-  "download_hosts": ["dln1.ncdn.ec"]
+  "download_hosts": []
 }
 ```
 
@@ -170,11 +170,19 @@ browser-check page is accepted as a book. Source EPUBs and prepared attachments
 are capped at 30 MiB, independently of the MAM torrent cap.
 
 Downloads use HTTPS and at most three manually validated redirects. The base
-host is trusted; `dln1.ncdn.ec` is the file CDN verified from the provider's guest
-redirect. Additional exact file hosts must be explicitly verified and
-listed in `download_hosts`. The API never accepts a URL or download host from
+host and the verified `ncdn.ec` CDN family are trusted, including `cdl.ncdn.ec`
+and `dln1.ncdn.ec`. Domain matching uses DNS label boundaries; lookalike names
+such as `ncdn.ec.attacker.example` do not match. Additional exact file hosts must
+be explicitly verified and listed in `download_hosts`. The API never accepts a URL or download host from
 the caller. URLs, guest cookies and response bodies are excluded from telemetry.
 Searches share an overall budget below the API's 120-second deadline.
+
+Z-Library uses a direct connection with a five-second DNS lookup deadline.
+All returned addresses must be public unicast (at most 32); mixed public/private
+answers fail closed. The HTTP connector uses the validated addresses directly
+and still verifies the original TLS hostname. Ambient proxy variables are not
+used, so a proxy cannot bypass destination checks. DNS rejections produce a
+`provider_dns_rejected` event containing only the provider and hostname.
 
 The supported guest check is completed automatically using the site's SHA-1
 proof-of-work protocol. Only bounded challenge data is parsed; remote JavaScript
@@ -191,6 +199,13 @@ quota. A durable `.part` file records interrupted attempts. An explicit owner
 `retry` clears that partial attempt; complete source files survive restarts and
 are reused. Preparation and SMTP retain their existing recovery behavior.
 Set `enabled` to false and restart both services to disable guest access.
+
+After this CDN-policy upgrade, an explicit `select`/`request` can resume an old
+`ncdn.ec` host-policy failure using the same job. Recovery requires state
+`failed`, no prepared path and no delivery attempt. Partial files are reset
+inside a serialized database transaction before the job is requeued. Status
+polling never retries. Other failures, including quota and uncertain delivery,
+retain the owner-only retry rules. Completed jobs are never automatically resent.
 
 States: `queued` → `downloading` → `preparing` → `ready` → `sending` →
 `smtp_accepted`. Only a user's device confirmation changes a job to `delivered`.

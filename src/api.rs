@@ -158,7 +158,7 @@ fn help_document(c: &Config, role: Role) -> Value {
         "operations": {
             "search": "Read-only lookup with query, optional author/language and source (auto, mam or zlibrary). Use the book title as query and pass the author separately when known. Returns releases and caches IDs. NEVER creates a job, downloads or sends a book.",
             "request": "Submit title, optional author/language/source, and an idempotency_key. A clear match creates or reuses a job; ambiguity returns clarification_required. Completed searches with no suitable book return not_found. Neither creates a job. Search and automatic fallback follow the same source policy.",
-            "select": "Submit an eligible release_id from search or clarification candidates, language if needed, and an idempotency_key. Creates or reuses a job. The worker automatically downloads, prepares and sends it; no separate download/send call is needed.",
+            "select": "Submit an eligible release_id from search or clarification candidates, language if needed, and an idempotency_key. Creates or reuses a job. An explicit retry can resume an old ncdn.ec host-policy failure only before preparation or any email attempt. The worker automatically downloads, prepares and sends it; no separate download/send call is needed.",
             "jobs": "List existing jobs. Does not create or start anything.",
             "status": "Read an existing job using its job_id. Does not create or start anything."
         },
@@ -168,8 +168,9 @@ fn help_document(c: &Config, role: Role) -> Value {
             "After clarification_required, ask only about the ambiguity described in reason/candidates, then select the user's choice.",
             "After not_found, report that the successfully searched sources had no suitable match. Candidates are alternatives, not confirmed matches. A failed fallback instead returns clarification_required with reason=search_incomplete and warnings; do not claim the book is absent.",
             "Only report that a job exists after receiving ok=true and data.job.id. Inspect data.job.state: a replay can return a completed job without sending again.",
+            "When the user retries a book previously blocked by the old ncdn.ec host policy, select the same release_id. The server safely resumes that specific pre-download failure using the existing job. Polling never retries; other failed jobs still need owner intervention. Never retry smtp_accepted, delivered or send_uncertain jobs automatically.",
             "Poll status for the returned job_id every 15–30 seconds until a terminal state. Downloads and SMTP run in the background.",
-            "Report SMTP acceptance accurately and ask the user to confirm actual Kindle arrival. The restricted client cannot force retries or mark delivery confirmed."
+            "Report SMTP acceptance accurately and ask the user to confirm actual Kindle arrival. The restricted client cannot retry sends or mark delivery confirmed."
         ],
         "http": {"method":"POST", "path":"/v1/operations", "content_type":"application/json", "client_timeout_seconds":130},
         "examples": {
@@ -187,7 +188,7 @@ fn help_document(c: &Config, role: Role) -> Value {
             "smtp_accepted":"SMTP accepted the email. This is not proof the book arrived on the Kindle. Stop polling and ask the user to verify arrival.",
             "delivered":"Delivery was confirmed by the owner.",
             "send_uncertain":"A send may have succeeded. Stop and ask the owner to check Kindle/email; do not resubmit with a new key or retry automatically.",
-            "failed":"Report job.error.code and job.error.message. Owner intervention is required for retry.",
+            "failed":"Report job.error.code and job.error.message. A user retry via select/request can resume an old approved-CDN host failure only before any prepared file or email attempt; other failures require owner intervention.",
             "existing_workflow":"The torrent belongs to the existing workflow. Report this; do not change its category."
         },
         "limits": {"requests_per_minute":c.api.requests_per_minute, "new_jobs_per_rolling_24_hours":c.api.jobs_per_day, "max_torrent_bytes":c.max_torrent_bytes, "max_epub_bytes":crate::zlibrary::MAX_EPUB_BYTES,"max_request_bytes":8192},
