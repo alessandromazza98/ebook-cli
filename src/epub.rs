@@ -84,7 +84,10 @@ pub fn prepare(input: &Path, output: &Path, selected_language: &str) -> Result<s
         let mut e = archive
             .by_index(i)
             .map_err(|_| unsafe_epub("Encrypted or unreadable ZIP entry"))?;
-        let name = e.name().to_string();
+        let name = e
+            .name()
+            .map_err(|_| unsafe_epub("Archive path traversal or invalid entry name"))?
+            .into_owned();
         let path = Path::new(&name);
         if name.contains(['\\', '\0', ':'])
             || path.is_absolute()

@@ -304,22 +304,20 @@ fn repair_epub_inner(
     // Refuse DRM-encrypted files. Presence of META-INF/encryption.xml or
     // META-INF/rights.xml is the universal marker (Adobe ADEPT, B&N Social
     // DRM, Readium LCP all use one of these).
+    let mut container_key = None;
     for name in archive.file_names() {
+        let name = name.map_err(RepairError::ZipRead)?;
         let lower = name.to_ascii_lowercase();
         if lower == "meta-inf/encryption.xml" || lower == "meta-inf/rights.xml" {
             return Err(RepairError::DrmEncrypted);
         }
+        if lower == "meta-inf/container.xml" && container_key.is_none() {
+            container_key = Some(name.into_owned());
+        }
     }
 
-    // Sanity-check EPUB structure: we need a mimetype file and a
-    // META-INF/container.xml. If neither is present, this is not an EPUB.
-    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
-    let has_container = names
-        .iter()
-        .any(|n| n.eq_ignore_ascii_case("META-INF/container.xml"));
-    if !has_container {
-        return Err(RepairError::NotAnEpub);
-    }
+    // A mimetype file can be repaired, but the EPUB container is required.
+    let container_key = container_key.ok_or(RepairError::NotAnEpub)?;
 
     // Classify each entry: text files we might edit, binary files we pass
     // through. The text set matches the reference implementation.
@@ -329,7 +327,7 @@ fn repair_epub_inner(
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(RepairError::ZipRead)?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(RepairError::ZipRead)?.into_owned();
         if entry.is_dir() {
             continue;
         }
@@ -358,11 +356,6 @@ fn repair_epub_inner(
     }
 
     // Locate the OPF via container.xml. We only need the relative path.
-    let container_key = names
-        .iter()
-        .find(|n| n.eq_ignore_ascii_case("META-INF/container.xml"))
-        .cloned()
-        .ok_or(RepairError::NotAnEpub)?;
     let container_xml = text_files
         .get(&container_key)
         .cloned()
@@ -1046,7 +1039,7 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         let mut a = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         (0..a.len())
-            .map(|i| a.by_index(i).unwrap().name().to_string())
+            .map(|i| a.by_index(i).unwrap().name().unwrap().into_owned())
             .collect()
     }
 
